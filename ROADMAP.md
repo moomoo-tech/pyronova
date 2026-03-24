@@ -205,21 +205,67 @@ Pyre 唯一落后 Robyn 的场景：I/O 并发（sleep 1ms: 7.9k vs 78k, 10x 差
 - 金融计算应在后台进程，Web 层只负责 I/O
 - 推荐 Polars 替代 Pandas（释放 GIL，不阻塞 Pyre）
 
-### 实现方案
+### Phase 7.1: 基础 async handler (DONE ✓) — 2026-03-24
 
-检测 handler 返回 coroutine → 在 Rust 侧 await Python asyncio Future：
-- 识别：`PyCoro_CheckExact(result_ptr)`
-- 桥接：每个子解释器维护独立 asyncio event loop
-- await：`pyo3_asyncio::into_future` 或手写 FFI 桥接
-- 效果：I/O 挂起时释放 worker，不阻塞 Tokio
+- [x] 检测 handler 返回 coroutine (`PyCoro_CheckExact`)
+- [x] GIL 模式：`asyncio.run(coro)` in `spawn_blocking`
+- [x] SubInterp 模式：每个 worker 维护独立 asyncio event loop，`loop.run_until_complete(coro)`
+- [x] `async def` handler 功能完全可用（两种模式）
+- 当前性能：8k req/s（每 worker 串行执行协程）
 
-### 目标
+### Phase 7.2: 异步多路复用 (TODO)
 
+每个 sub-interpreter worker 内嵌 `tokio::runtime::current_thread` + `LocalSet`，
+用 `spawn_local` 并发跑多个协程。10 个 worker 各自同时处理数百个 await 中的请求。
+
+目标：
 ```
-sleep(1ms) I/O:  7.9k → 70k+  (追平 Robyn)
+sleep(1ms) I/O:  8k → 70k+    (追平 Robyn)
 asyncpg/aiohttp: 可用          (Python async 生态兼容)
 内存:            保持 67MB      (不引入多进程)
 ```
+
+## Phase 8 — 跨子解释器状态共享 (SharedState)
+
+核心问题：PEP 684 子解释器内存隔离，10 个子解释器中的 `GLOBAL_CACHE = {}` 是 10 个独立的空字典。
+
+### 设计原则
+
+1. **状态下沉到 Rust** — Python 只是调用方，共享数据结构在 Rust 堆上
+2. **绝不跨解释器共享 PyObject** — 边界处 Rust 原生类型 ↔ Python 对象互转
+3. **无锁高并发** — `DashMap` 分片锁，不同 Key 零竞争
+
+### 实现方案
+
+```rust
+// Rust: 高并发共享字典
+#[pyclass]
+pub struct SharedState {
+    inner: Arc<DashMap<String, String>>,  // 或 Vec<u8> 支持二进制
+}
+```
+
+```python
+# Python: 像普通字典一样使用
+app.state["session:user_123"] = json.dumps({"role": "admin"})
+session = json.loads(app.state["session:user_123"])
+```
+
+### 架构优势 vs Redis
+
+| 维度 | Pyre SharedState | Redis |
+|------|-----------------|-------|
+| 延迟 | **纳秒级** (内存直读) | 毫秒级 (网络 I/O) |
+| 部署 | 零依赖 | 需要独立 Redis 进程 |
+| 数据类型 | String / bytes | 丰富但有序列化开销 |
+| 适用场景 | Session、缓存、计数器 | 分布式、持久化 |
+
+### 拓展路线
+
+1. `DashMap<String, String>` — 基础 KV（JSON 序列化）
+2. `DashMap<String, Vec<u8>>` — 二进制共享池（行情数据、Tensor）
+3. `moka` Cache — 带 TTL 过期的缓存（Session 自动清理）
+4. 通过 `app.state` 暴露给 Python，所有子解释器共享同一个 Arc
 
 ## 长期愿景
 - 成为第一个同时支持 free-threaded 和 per-interpreter GIL 的 Python web 框架
