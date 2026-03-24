@@ -191,7 +191,7 @@ class MCPServer:
                 "resources": {"subscribe": False, "listChanged": False},
                 "prompts": {"listChanged": False},
             },
-            "serverInfo": {"name": "pyre-mcp", "version": "0.6.0"},
+            "serverInfo": {"name": "pyre-mcp", "version": "1.0.0"},
         }
 
     def _handle_tools_list(self, params: dict) -> dict:

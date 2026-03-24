@@ -132,7 +132,7 @@ pub(crate) fn build_response(
             let mut builder = Response::builder()
                 .status(status)
                 .header("content-type", &data.content_type)
-                .header("server", "Pyre/0.5.0");
+                .header("server", "Pyre/1.0.0");
             for (k, v) in &data.headers {
                 builder = builder.header(k.as_str(), v.as_str());
             }
@@ -146,7 +146,7 @@ pub(crate) fn error_response(msg: &str) -> Response<Full<Bytes>> {
     Response::builder()
         .status(StatusCode::INTERNAL_SERVER_ERROR)
         .header("content-type", "application/json")
-        .header("server", "Pyre/0.5.0")
+        .header("server", "Pyre/1.0.0")
         .body(Full::new(Bytes::from(
             format!(r#"{{"error":"{}"}}"#, msg.replace('"', "\\\"")),
         )))
@@ -158,7 +158,7 @@ pub(crate) fn overloaded_response(msg: &str) -> Response<Full<Bytes>> {
     Response::builder()
         .status(StatusCode::SERVICE_UNAVAILABLE)
         .header("content-type", "application/json")
-        .header("server", "Pyre/0.5.0")
+        .header("server", "Pyre/1.0.0")
         .header("retry-after", "1")
         .body(Full::new(Bytes::from(
             format!(r#"{{"error":"{}"}}"#, msg.replace('"', "\\\"")),
@@ -171,7 +171,7 @@ pub(crate) fn payload_too_large_response() -> Response<Full<Bytes>> {
     Response::builder()
         .status(StatusCode::PAYLOAD_TOO_LARGE)
         .header("content-type", "application/json")
-        .header("server", "Pyre/0.5.0")
+        .header("server", "Pyre/1.0.0")
         .body(Full::new(Bytes::from_static(
             b"{\"error\":\"payload too large\"}",
         )))
@@ -183,7 +183,7 @@ pub(crate) fn not_found_response() -> Response<Full<Bytes>> {
     Response::builder()
         .status(StatusCode::NOT_FOUND)
         .header("content-type", "application/json")
-        .header("server", "Pyre/0.5.0")
+        .header("server", "Pyre/1.0.0")
         .body(Full::new(Bytes::from_static(b"{\"error\":\"not found\"}")))
         .unwrap()
 }

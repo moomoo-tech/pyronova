@@ -296,7 +296,7 @@ fn build_stream_response(info: StreamInfo) -> Response<BoxBody> {
         .header("content-type", &info.content_type)
         .header("cache-control", "no-cache")
         .header("connection", "keep-alive")
-        .header("server", "Pyre/0.5.0");
+        .header("server", "Pyre/1.0.0");
     for (k, v) in &info.headers {
         builder = builder.header(k.as_str(), v.as_str());
     }
@@ -399,7 +399,7 @@ pub(crate) async fn handle_request_subinterp(
             let mut builder = Response::builder()
                 .status(status)
                 .header("content-type", &ct)
-                .header("server", "Pyre/0.5.0-subinterp");
+                .header("server", "Pyre/1.0.0");
             for (k, v) in &resp.headers {
                 builder = builder.header(k.as_str(), v.as_str());
             }
