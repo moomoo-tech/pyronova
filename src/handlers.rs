@@ -34,30 +34,44 @@ struct StreamInfo {
     content_type: String,
     status: u16,
     headers: HashMap<String, String>,
-    /// Handle to the Python thread running the handler
-    _thread: std::thread::JoinHandle<()>,
 }
 
 /// If `obj` is a coroutine (from `async def`), execute it via a thread-local
-/// asyncio event loop. Otherwise return it unchanged.
+/// persistent asyncio event loop. Otherwise return it unchanged.
+///
+/// Uses thread_local to cache event loop per spawn_blocking thread —
+/// avoids asyncio.run() overhead of creating/destroying loop per request.
 fn resolve_coroutine(py: Python<'_>, obj: Py<PyAny>) -> Result<Py<PyAny>, String> {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static LOOP: RefCell<Option<Py<PyAny>>> = const { RefCell::new(None) };
+    }
+
     let bound = obj.bind(py);
     let is_coro = unsafe { pyo3::ffi::PyCoro_CheckExact(bound.as_ptr()) == 1 };
     if !is_coro {
         return Ok(obj);
     }
-    // Use thread-local persistent event loop (avoids asyncio.run() overhead
-    // of creating + destroying a loop per request)
-    let asyncio = py.import("asyncio").map_err(|e| format!("import asyncio: {e}"))?;
 
-    // Use asyncio.run() — creates a temporary event loop per call.
-    // Each spawn_blocking thread can run asyncio concurrently since
-    // asyncio releases GIL during I/O waits.
-    let result = asyncio
-        .call_method1("run", (bound,))
-        .map_err(|e| format!("asyncio.run error: {e}"))?;
+    LOOP.with(|tl| {
+        let mut slot = tl.borrow_mut();
 
-    Ok(result.unbind())
+        if slot.is_none() {
+            let asyncio = py.import("asyncio").map_err(|e| format!("import asyncio: {e}"))?;
+            let new_loop = asyncio
+                .call_method0("new_event_loop")
+                .map_err(|e| format!("new_event_loop: {e}"))?;
+            let _ = asyncio.call_method1("set_event_loop", (&new_loop,));
+            *slot = Some(new_loop.unbind());
+        }
+
+        let event_loop = slot.as_ref().unwrap().bind(py);
+        let result = event_loop
+            .call_method1("run_until_complete", (bound,))
+            .map_err(|e| format!("run_until_complete error: {e}"))?;
+        Ok(result.unbind())
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -212,7 +226,6 @@ fn call_handler_with_hooks(
                         content_type,
                         status,
                         headers: hdrs,
-                        _thread: std::thread::spawn(|| {}),
                     });
                 }
 
