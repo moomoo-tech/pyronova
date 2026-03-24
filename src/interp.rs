@@ -1315,64 +1315,10 @@ fn worker_thread_loop_async(
         .collect::<Vec<_>>()
         .join(", ");
 
+    // Load async engine from external Python file (syntax highlighting + maintainability)
+    let engine_template = include_str!("../python/skytrade/_async_engine.py");
     let engine_script = format!(
-        r#"
-import asyncio
-import threading
-
-WORKER_ID = {worker_idx}
-HANDLER_NAMES = [{handlers_array}]
-
-async def _process_request(req_id, handler_idx, method, path, query, body_bytes):
-    try:
-        handler_name = HANDLER_NAMES[int(handler_idx)]
-        handler = globals().get(handler_name)
-        if handler is None:
-            _pyre_send(WORKER_ID, req_id, 500, "text/plain", b"handler not found")
-            return
-
-        req = _SkyRequest(method, path, {{}}, query, body_bytes, {{}})
-        res = handler(req)
-
-        if asyncio.iscoroutine(res):
-            res = await res
-
-        if isinstance(res, _SkyResponse):
-            body = str(res.body).encode('utf-8') if not isinstance(res.body, bytes) else res.body
-            _pyre_send(WORKER_ID, req_id, res.status_code, res.content_type or "text/plain", body)
-        elif isinstance(res, dict):
-            import json
-            _pyre_send(WORKER_ID, req_id, 200, "application/json", json.dumps(res).encode('utf-8'))
-        elif isinstance(res, bytes):
-            _pyre_send(WORKER_ID, req_id, 200, "application/octet-stream", res)
-        else:
-            body = str(res).encode('utf-8')
-            ct = "application/json" if body.startswith(b'{{') or body.startswith(b'[') else "text/plain"
-            _pyre_send(WORKER_ID, req_id, 200, ct, body)
-    except Exception as e:
-        _pyre_send(WORKER_ID, req_id, 500, "text/plain", str(e).encode('utf-8'))
-
-def _fetcher_thread(loop):
-    while True:
-        req_data = _pyre_recv(WORKER_ID)
-        if req_data is None:
-            break
-        req_id, handler_idx, method, path, query, body_bytes = req_data
-        # Capture values to avoid late binding in lambda
-        asyncio.run_coroutine_threadsafe(
-            _process_request(req_id, handler_idx, method, path, query, body_bytes),
-            loop,
-        )
-
-async def _pyre_engine():
-    loop = asyncio.get_running_loop()
-    t = threading.Thread(target=_fetcher_thread, args=(loop,), daemon=False)
-    t.start()
-    # Keep event loop alive until fetcher exits
-    await asyncio.to_thread(t.join)
-
-asyncio.run(_pyre_engine())
-"#
+        "WORKER_ID = {worker_idx}\nHANDLER_NAMES = [{handlers_array}]\n{engine_template}"
     );
 
     unsafe {
