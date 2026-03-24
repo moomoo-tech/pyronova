@@ -672,6 +672,7 @@ pub(crate) struct InterpreterPool {
     _worker_threads: Vec<std::thread::JoinHandle<()>>,
     routers: HashMap<String, Router<usize>>,
     handler_names: Vec<String>,
+    pub(crate) requires_gil: Vec<bool>,
     pub(crate) static_dirs: Vec<(String, String)>,
 }
 
@@ -690,6 +691,7 @@ impl InterpreterPool {
         routers: HashMap<String, Router<usize>>,
         before_hook_names: &[String],
         static_dirs: Vec<(String, String)>,
+        requires_gil: Vec<bool>,
     ) -> Result<Self, String> {
         // Read and filter the script using AST (on the main interpreter)
         let raw_script = std::fs::read_to_string(script_path)
@@ -743,6 +745,7 @@ impl InterpreterPool {
             _worker_threads: threads,
             routers,
             handler_names: handler_names.to_vec(),
+            requires_gil,
             static_dirs,
         })
     }

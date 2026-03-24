@@ -1,0 +1,1306 @@
+{
+  "timestamp": "2026-03-24_113354",
+  "system": {
+    "python": "3.14.3 (main, Feb  3 2026, 15:32:20) [Clang 17.0.0 (clang-1700.6.3.2)]",
+    "wrk_params_high": "-t4 -c256 -d10s",
+    "wrk_params_low": "-t1 -c10 -d10s"
+  },
+  "results": [
+    {
+      "framework": "pyre_subinterp",
+      "scenario_id": "t1",
+      "scenario_name": "Hello World",
+      "group": "basic",
+      "high_concurrency": {
+        "req_per_sec": 219210.35,
+        "avg_latency_ms": 0.842,
+        "max_latency_ms": 23.98,
+        "stdev_latency_ms": 0.66,
+        "total_requests": 2195370,
+        "errors": 0,
+        "transfer_per_sec": "31.57MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 133554.56,
+        "avg_latency_ms": 0.085,
+        "max_latency_ms": 16.22,
+        "stdev_latency_ms": 0.377,
+        "total_requests": 1348848,
+        "errors": 0,
+        "transfer_per_sec": "19.23MB"
+      }
+    },
+    {
+      "framework": "pyre_subinterp",
+      "scenario_id": "t2",
+      "scenario_name": "JSON small (3 fields)",
+      "group": "basic",
+      "high_concurrency": {
+        "req_per_sec": 211950.99,
+        "avg_latency_ms": 0.91,
+        "max_latency_ms": 38.47,
+        "stdev_latency_ms": 1.0,
+        "total_requests": 2126474,
+        "errors": 0,
+        "transfer_per_sec": "36.18MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 120373.19,
+        "avg_latency_ms": 0.139,
+        "max_latency_ms": 22.79,
+        "stdev_latency_ms": 0.89,
+        "total_requests": 1204176,
+        "errors": 0,
+        "transfer_per_sec": "20.55MB"
+      }
+    },
+    {
+      "framework": "pyre_subinterp",
+      "scenario_id": "t3",
+      "scenario_name": "JSON medium (100 users)",
+      "group": "basic",
+      "high_concurrency": {
+        "req_per_sec": 59943.05,
+        "avg_latency_ms": 4.46,
+        "max_latency_ms": 80.11,
+        "stdev_latency_ms": 2.79,
+        "total_requests": 600579,
+        "errors": 0,
+        "transfer_per_sec": "431.43MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 52197.13,
+        "avg_latency_ms": 0.19,
+        "max_latency_ms": 8.81,
+        "stdev_latency_ms": 0.173,
+        "total_requests": 527181,
+        "errors": 0,
+        "transfer_per_sec": "375.68MB"
+      }
+    },
+    {
+      "framework": "pyre_subinterp",
+      "scenario_id": "t4",
+      "scenario_name": "JSON large (500 records)",
+      "group": "basic",
+      "high_concurrency": {
+        "req_per_sec": 4738.99,
+        "avg_latency_ms": 53.59,
+        "max_latency_ms": 174.77,
+        "stdev_latency_ms": 11.01,
+        "total_requests": 47811,
+        "errors": 0,
+        "transfer_per_sec": "422.54MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 4149.77,
+        "avg_latency_ms": 2.86,
+        "max_latency_ms": 75.13,
+        "stdev_latency_ms": 3.76,
+        "total_requests": 41556,
+        "errors": 0,
+        "transfer_per_sec": "370.00MB"
+      }
+    },
+    {
+      "framework": "pyre_subinterp",
+      "scenario_id": "c1",
+      "scenario_name": "fib(10)",
+      "group": "cpu",
+      "high_concurrency": {
+        "req_per_sec": 199758.4,
+        "avg_latency_ms": 1.07,
+        "max_latency_ms": 42.45,
+        "stdev_latency_ms": 1.27,
+        "total_requests": 2010329,
+        "errors": 0,
+        "transfer_per_sec": "28.96MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 112336.91,
+        "avg_latency_ms": 0.099,
+        "max_latency_ms": 14.78,
+        "stdev_latency_ms": 0.382,
+        "total_requests": 1134615,
+        "errors": 0,
+        "transfer_per_sec": "16.28MB"
+      }
+    },
+    {
+      "framework": "pyre_subinterp",
+      "scenario_id": "c2",
+      "scenario_name": "fib(20)",
+      "group": "cpu",
+      "high_concurrency": {
+        "req_per_sec": 10477.3,
+        "avg_latency_ms": 24.8,
+        "max_latency_ms": 144.78,
+        "stdev_latency_ms": 8.86,
+        "total_requests": 105415,
+        "errors": 0,
+        "transfer_per_sec": "1.54MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 10621.21,
+        "avg_latency_ms": 1.02,
+        "max_latency_ms": 38.93,
+        "stdev_latency_ms": 1.15,
+        "total_requests": 107316,
+        "errors": 0,
+        "transfer_per_sec": "1.56MB"
+      }
+    },
+    {
+      "framework": "pyre_subinterp",
+      "scenario_id": "c3",
+      "scenario_name": "fib(30)",
+      "group": "cpu",
+      "high_concurrency": {
+        "req_per_sec": 89.52,
+        "avg_latency_ms": 1260.0,
+        "max_latency_ms": 2000.0,
+        "stdev_latency_ms": 440.54,
+        "total_requests": 905,
+        "errors": 0,
+        "transfer_per_sec": "13.64KB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 71.08,
+        "avg_latency_ms": 104.15,
+        "max_latency_ms": 225.68,
+        "stdev_latency_ms": 19.1,
+        "total_requests": 716,
+        "errors": 0,
+        "transfer_per_sec": "10.83KB"
+      }
+    },
+    {
+      "framework": "pyre_subinterp",
+      "scenario_id": "p1",
+      "scenario_name": "Pure Python sum(10k)",
+      "group": "python",
+      "high_concurrency": {
+        "req_per_sec": 75820.75,
+        "avg_latency_ms": 3.4,
+        "max_latency_ms": 61.37,
+        "stdev_latency_ms": 1.63,
+        "total_requests": 759025,
+        "errors": 0,
+        "transfer_per_sec": "11.42MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 61560.21,
+        "avg_latency_ms": 0.156,
+        "max_latency_ms": 7.33,
+        "stdev_latency_ms": 0.113,
+        "total_requests": 621752,
+        "errors": 0,
+        "transfer_per_sec": "9.28MB"
+      }
+    },
+    {
+      "framework": "pyre_subinterp",
+      "scenario_id": "i1",
+      "scenario_name": "sleep(1ms)",
+      "group": "io",
+      "high_concurrency": {
+        "req_per_sec": 7894.07,
+        "avg_latency_ms": 32.27,
+        "max_latency_ms": 43.4,
+        "stdev_latency_ms": 1.63,
+        "total_requests": 79029,
+        "errors": 0,
+        "transfer_per_sec": "1.11MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 6948.69,
+        "avg_latency_ms": 1.44,
+        "max_latency_ms": 20.7,
+        "stdev_latency_ms": 0.591,
+        "total_requests": 69559,
+        "errors": 0,
+        "transfer_per_sec": "0.98MB"
+      }
+    },
+    {
+      "framework": "pyre_subinterp",
+      "scenario_id": "j1",
+      "scenario_name": "Parse 41B JSON",
+      "group": "json",
+      "high_concurrency": {
+        "req_per_sec": 196230.54,
+        "avg_latency_ms": 1.18,
+        "max_latency_ms": 36.03,
+        "stdev_latency_ms": 1.31,
+        "total_requests": 1965827,
+        "errors": 0,
+        "transfer_per_sec": "33.50MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 119817.99,
+        "avg_latency_ms": 0.086,
+        "max_latency_ms": 16.48,
+        "stdev_latency_ms": 0.347,
+        "total_requests": 1210625,
+        "errors": 0,
+        "transfer_per_sec": "20.45MB"
+      }
+    },
+    {
+      "framework": "pyre_subinterp",
+      "scenario_id": "j2",
+      "scenario_name": "Parse 7KB JSON",
+      "group": "json",
+      "high_concurrency": {
+        "req_per_sec": 92672.17,
+        "avg_latency_ms": 2.75,
+        "max_latency_ms": 60.29,
+        "stdev_latency_ms": 1.41,
+        "total_requests": 929169,
+        "errors": 0,
+        "transfer_per_sec": "13.43MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 68075.58,
+        "avg_latency_ms": 0.168,
+        "max_latency_ms": 17.96,
+        "stdev_latency_ms": 0.518,
+        "total_requests": 680990,
+        "errors": 0,
+        "transfer_per_sec": "9.87MB"
+      }
+    },
+    {
+      "framework": "pyre_subinterp",
+      "scenario_id": "j3",
+      "scenario_name": "Parse 93KB JSON",
+      "group": "json",
+      "high_concurrency": {
+        "req_per_sec": 9835.93,
+        "avg_latency_ms": 25.9,
+        "max_latency_ms": 150.26,
+        "stdev_latency_ms": 4.45,
+        "total_requests": 98795,
+        "errors": 0,
+        "transfer_per_sec": "1.43MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 9651.67,
+        "avg_latency_ms": 1.1,
+        "max_latency_ms": 41.0,
+        "stdev_latency_ms": 1.14,
+        "total_requests": 97523,
+        "errors": 0,
+        "transfer_per_sec": "1.40MB"
+      }
+    },
+    {
+      "framework": "pyre_gil",
+      "scenario_id": "t1",
+      "scenario_name": "Hello World",
+      "group": "basic",
+      "high_concurrency": {
+        "req_per_sec": 119049.47,
+        "avg_latency_ms": 2.22,
+        "max_latency_ms": 28.54,
+        "stdev_latency_ms": 1.3,
+        "total_requests": 1202565,
+        "errors": 0,
+        "transfer_per_sec": "16.01MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 115926.47,
+        "avg_latency_ms": 0.101,
+        "max_latency_ms": 8.19,
+        "stdev_latency_ms": 0.212,
+        "total_requests": 1170783,
+        "errors": 0,
+        "transfer_per_sec": "15.59MB"
+      }
+    },
+    {
+      "framework": "pyre_gil",
+      "scenario_id": "t2",
+      "scenario_name": "JSON small (3 fields)",
+      "group": "basic",
+      "high_concurrency": {
+        "req_per_sec": 114271.41,
+        "avg_latency_ms": 2.32,
+        "max_latency_ms": 28.89,
+        "stdev_latency_ms": 1.37,
+        "total_requests": 1154273,
+        "errors": 0,
+        "transfer_per_sec": "17.87MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 113664.77,
+        "avg_latency_ms": 0.11,
+        "max_latency_ms": 16.11,
+        "stdev_latency_ms": 0.363,
+        "total_requests": 1148043,
+        "errors": 0,
+        "transfer_per_sec": "17.78MB"
+      }
+    },
+    {
+      "framework": "pyre_gil",
+      "scenario_id": "t3",
+      "scenario_name": "JSON medium (100 users)",
+      "group": "basic",
+      "high_concurrency": {
+        "req_per_sec": 14736.94,
+        "avg_latency_ms": 17.66,
+        "max_latency_ms": 122.36,
+        "stdev_latency_ms": 9.77,
+        "total_requests": 148847,
+        "errors": 0,
+        "transfer_per_sec": "94.68MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 14564.01,
+        "avg_latency_ms": 1.34,
+        "max_latency_ms": 71.11,
+        "stdev_latency_ms": 3.45,
+        "total_requests": 147092,
+        "errors": 0,
+        "transfer_per_sec": "93.57MB"
+      }
+    },
+    {
+      "framework": "pyre_gil",
+      "scenario_id": "t4",
+      "scenario_name": "JSON large (500 records)",
+      "group": "basic",
+      "high_concurrency": {
+        "req_per_sec": 1894.54,
+        "avg_latency_ms": 134.25,
+        "max_latency_ms": 399.9,
+        "stdev_latency_ms": 58.57,
+        "total_requests": 18996,
+        "errors": 0,
+        "transfer_per_sec": "155.35MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 1888.73,
+        "avg_latency_ms": 5.51,
+        "max_latency_ms": 54.87,
+        "stdev_latency_ms": 2.69,
+        "total_requests": 18901,
+        "errors": 0,
+        "transfer_per_sec": "154.88MB"
+      }
+    },
+    {
+      "framework": "pyre_gil",
+      "scenario_id": "c1",
+      "scenario_name": "fib(10)",
+      "group": "cpu",
+      "high_concurrency": {
+        "req_per_sec": 75526.02,
+        "avg_latency_ms": 3.49,
+        "max_latency_ms": 35.01,
+        "stdev_latency_ms": 1.98,
+        "total_requests": 762917,
+        "errors": 0,
+        "transfer_per_sec": "10.16MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 74778.41,
+        "avg_latency_ms": 0.17,
+        "max_latency_ms": 16.42,
+        "stdev_latency_ms": 0.441,
+        "total_requests": 755242,
+        "errors": 0,
+        "transfer_per_sec": "10.06MB"
+      }
+    },
+    {
+      "framework": "pyre_gil",
+      "scenario_id": "c2",
+      "scenario_name": "fib(20)",
+      "group": "cpu",
+      "high_concurrency": {
+        "req_per_sec": 1916.99,
+        "avg_latency_ms": 132.66,
+        "max_latency_ms": 383.9,
+        "stdev_latency_ms": 62.74,
+        "total_requests": 19241,
+        "errors": 0,
+        "transfer_per_sec": "267.71KB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 1950.3,
+        "avg_latency_ms": 5.3,
+        "max_latency_ms": 63.83,
+        "stdev_latency_ms": 2.78,
+        "total_requests": 19697,
+        "errors": 0,
+        "transfer_per_sec": "272.36KB"
+      }
+    },
+    {
+      "framework": "pyre_gil",
+      "scenario_id": "c3",
+      "scenario_name": "fib(30)",
+      "group": "cpu",
+      "high_concurrency": {
+        "req_per_sec": 12.29,
+        "avg_latency_ms": 749.6,
+        "max_latency_ms": 920.88,
+        "stdev_latency_ms": 242.23,
+        "total_requests": 124,
+        "errors": 0,
+        "transfer_per_sec": "1.74KB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 12.59,
+        "avg_latency_ms": 600.21,
+        "max_latency_ms": 976.38,
+        "stdev_latency_ms": 133.68,
+        "total_requests": 127,
+        "errors": 0,
+        "transfer_per_sec": "1.78KB"
+      }
+    },
+    {
+      "framework": "pyre_gil",
+      "scenario_id": "p1",
+      "scenario_name": "Pure Python sum(10k)",
+      "group": "python",
+      "high_concurrency": {
+        "req_per_sec": 18632.13,
+        "avg_latency_ms": 14.18,
+        "max_latency_ms": 115.48,
+        "stdev_latency_ms": 8.4,
+        "total_requests": 188263,
+        "errors": 0,
+        "transfer_per_sec": "2.61MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 17797.77,
+        "avg_latency_ms": 1.66,
+        "max_latency_ms": 94.09,
+        "stdev_latency_ms": 4.49,
+        "total_requests": 179758,
+        "errors": 0,
+        "transfer_per_sec": "2.50MB"
+      }
+    },
+    {
+      "framework": "pyre_gil",
+      "scenario_id": "p2",
+      "scenario_name": "numpy mean(10k)",
+      "group": "python",
+      "high_concurrency": {
+        "req_per_sec": 8418.52,
+        "avg_latency_ms": 31.03,
+        "max_latency_ms": 193.46,
+        "stdev_latency_ms": 16.33,
+        "total_requests": 84381,
+        "errors": 0,
+        "transfer_per_sec": "1.28MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 8546.32,
+        "avg_latency_ms": 1.24,
+        "max_latency_ms": 26.15,
+        "stdev_latency_ms": 0.96,
+        "total_requests": 85503,
+        "errors": 0,
+        "transfer_per_sec": "1.30MB"
+      }
+    },
+    {
+      "framework": "pyre_gil",
+      "scenario_id": "p3",
+      "scenario_name": "numpy SVD 100x100",
+      "group": "python",
+      "high_concurrency": {
+        "req_per_sec": 4082.79,
+        "avg_latency_ms": 62.59,
+        "max_latency_ms": 202.03,
+        "stdev_latency_ms": 27.51,
+        "total_requests": 40893,
+        "errors": 0,
+        "transfer_per_sec": "562.18KB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 4054.01,
+        "avg_latency_ms": 2.49,
+        "max_latency_ms": 22.17,
+        "stdev_latency_ms": 0.74,
+        "total_requests": 40946,
+        "errors": 0,
+        "transfer_per_sec": "558.22KB"
+      }
+    },
+    {
+      "framework": "pyre_gil",
+      "scenario_id": "i1",
+      "scenario_name": "sleep(1ms)",
+      "group": "io",
+      "high_concurrency": {
+        "req_per_sec": 7354.49,
+        "avg_latency_ms": 35.21,
+        "max_latency_ms": 202.5,
+        "stdev_latency_ms": 17.25,
+        "total_requests": 73668,
+        "errors": 0,
+        "transfer_per_sec": "0.97MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 6709.45,
+        "avg_latency_ms": 1.51,
+        "max_latency_ms": 23.31,
+        "stdev_latency_ms": 0.665,
+        "total_requests": 67795,
+        "errors": 0,
+        "transfer_per_sec": "0.88MB"
+      }
+    },
+    {
+      "framework": "pyre_gil",
+      "scenario_id": "j1",
+      "scenario_name": "Parse 41B JSON",
+      "group": "json",
+      "high_concurrency": {
+        "req_per_sec": 102163.79,
+        "avg_latency_ms": 2.63,
+        "max_latency_ms": 40.92,
+        "stdev_latency_ms": 1.85,
+        "total_requests": 1031940,
+        "errors": 0,
+        "transfer_per_sec": "15.98MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 85008.45,
+        "avg_latency_ms": 0.406,
+        "max_latency_ms": 83.03,
+        "stdev_latency_ms": 2.73,
+        "total_requests": 858641,
+        "errors": 0,
+        "transfer_per_sec": "13.30MB"
+      }
+    },
+    {
+      "framework": "pyre_gil",
+      "scenario_id": "j2",
+      "scenario_name": "Parse 7KB JSON",
+      "group": "json",
+      "high_concurrency": {
+        "req_per_sec": 21099.87,
+        "avg_latency_ms": 13.6,
+        "max_latency_ms": 129.58,
+        "stdev_latency_ms": 11.01,
+        "total_requests": 213162,
+        "errors": 0,
+        "transfer_per_sec": "2.84MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 21262.38,
+        "avg_latency_ms": 0.483,
+        "max_latency_ms": 8.42,
+        "stdev_latency_ms": 0.239,
+        "total_requests": 214751,
+        "errors": 0,
+        "transfer_per_sec": "2.86MB"
+      }
+    },
+    {
+      "framework": "pyre_gil",
+      "scenario_id": "j3",
+      "scenario_name": "Parse 93KB JSON",
+      "group": "json",
+      "high_concurrency": {
+        "req_per_sec": 1976.2,
+        "avg_latency_ms": 132.18,
+        "max_latency_ms": 443.56,
+        "stdev_latency_ms": 72.63,
+        "total_requests": 19805,
+        "errors": 0,
+        "transfer_per_sec": "272.11KB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 1967.57,
+        "avg_latency_ms": 5.11,
+        "max_latency_ms": 29.26,
+        "stdev_latency_ms": 0.87,
+        "total_requests": 19872,
+        "errors": 0,
+        "transfer_per_sec": "270.93KB"
+      }
+    },
+    {
+      "framework": "pyre_hybrid",
+      "scenario_id": "t1",
+      "scenario_name": "Hello World",
+      "group": "basic",
+      "high_concurrency": {
+        "req_per_sec": 217609.68,
+        "avg_latency_ms": 0.88,
+        "max_latency_ms": 63.07,
+        "stdev_latency_ms": 1.34,
+        "total_requests": 2181121,
+        "errors": 0,
+        "transfer_per_sec": "31.34MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 139358.48,
+        "avg_latency_ms": 0.061,
+        "max_latency_ms": 4.54,
+        "stdev_latency_ms": 0.07,
+        "total_requests": 1407513,
+        "errors": 0,
+        "transfer_per_sec": "20.07MB"
+      }
+    },
+    {
+      "framework": "pyre_hybrid",
+      "scenario_id": "t2",
+      "scenario_name": "JSON small (3 fields)",
+      "group": "basic",
+      "high_concurrency": {
+        "req_per_sec": 217589.11,
+        "avg_latency_ms": 0.87,
+        "max_latency_ms": 24.47,
+        "stdev_latency_ms": 0.753,
+        "total_requests": 2179010,
+        "errors": 0,
+        "transfer_per_sec": "37.14MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 129926.11,
+        "avg_latency_ms": 0.07,
+        "max_latency_ms": 7.51,
+        "stdev_latency_ms": 0.143,
+        "total_requests": 1312264,
+        "errors": 0,
+        "transfer_per_sec": "22.18MB"
+      }
+    },
+    {
+      "framework": "pyre_hybrid",
+      "scenario_id": "t3",
+      "scenario_name": "JSON medium (100 users)",
+      "group": "basic",
+      "high_concurrency": {
+        "req_per_sec": 66114.02,
+        "avg_latency_ms": 3.86,
+        "max_latency_ms": 43.25,
+        "stdev_latency_ms": 1.21,
+        "total_requests": 661705,
+        "errors": 0,
+        "transfer_per_sec": "475.85MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 53385.01,
+        "avg_latency_ms": 0.187,
+        "max_latency_ms": 9.14,
+        "stdev_latency_ms": 0.211,
+        "total_requests": 534437,
+        "errors": 0,
+        "transfer_per_sec": "384.23MB"
+      }
+    },
+    {
+      "framework": "pyre_hybrid",
+      "scenario_id": "t4",
+      "scenario_name": "JSON large (500 records)",
+      "group": "basic",
+      "high_concurrency": {
+        "req_per_sec": 4811.55,
+        "avg_latency_ms": 53.01,
+        "max_latency_ms": 175.13,
+        "stdev_latency_ms": 9.77,
+        "total_requests": 48434,
+        "errors": 0,
+        "transfer_per_sec": "429.01MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 4720.14,
+        "avg_latency_ms": 2.25,
+        "max_latency_ms": 51.02,
+        "stdev_latency_ms": 1.8,
+        "total_requests": 47236,
+        "errors": 0,
+        "transfer_per_sec": "420.86MB"
+      }
+    },
+    {
+      "framework": "pyre_hybrid",
+      "scenario_id": "c1",
+      "scenario_name": "fib(10)",
+      "group": "cpu",
+      "high_concurrency": {
+        "req_per_sec": 199002.64,
+        "avg_latency_ms": 1.09,
+        "max_latency_ms": 31.95,
+        "stdev_latency_ms": 1.4,
+        "total_requests": 2001876,
+        "errors": 0,
+        "transfer_per_sec": "28.85MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 113448.95,
+        "avg_latency_ms": 0.156,
+        "max_latency_ms": 32.17,
+        "stdev_latency_ms": 1.14,
+        "total_requests": 1145847,
+        "errors": 0,
+        "transfer_per_sec": "16.45MB"
+      }
+    },
+    {
+      "framework": "pyre_hybrid",
+      "scenario_id": "c2",
+      "scenario_name": "fib(20)",
+      "group": "cpu",
+      "high_concurrency": {
+        "req_per_sec": 10366.76,
+        "avg_latency_ms": 24.72,
+        "max_latency_ms": 144.09,
+        "stdev_latency_ms": 6.43,
+        "total_requests": 104267,
+        "errors": 0,
+        "transfer_per_sec": "1.52MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 10824.91,
+        "avg_latency_ms": 0.94,
+        "max_latency_ms": 15.66,
+        "stdev_latency_ms": 0.537,
+        "total_requests": 109345,
+        "errors": 0,
+        "transfer_per_sec": "1.59MB"
+      }
+    },
+    {
+      "framework": "pyre_hybrid",
+      "scenario_id": "c3",
+      "scenario_name": "fib(30)",
+      "group": "cpu",
+      "high_concurrency": {
+        "req_per_sec": 90.65,
+        "avg_latency_ms": 1260.0,
+        "max_latency_ms": 1990.0,
+        "stdev_latency_ms": 424.76,
+        "total_requests": 909,
+        "errors": 0,
+        "transfer_per_sec": "13.81KB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 68.38,
+        "avg_latency_ms": 106.02,
+        "max_latency_ms": 225.32,
+        "stdev_latency_ms": 20.52,
+        "total_requests": 687,
+        "errors": 0,
+        "transfer_per_sec": "10.42KB"
+      }
+    },
+    {
+      "framework": "pyre_hybrid",
+      "scenario_id": "p1",
+      "scenario_name": "Pure Python sum(10k)",
+      "group": "python",
+      "high_concurrency": {
+        "req_per_sec": 75648.44,
+        "avg_latency_ms": 3.56,
+        "max_latency_ms": 75.96,
+        "stdev_latency_ms": 3.57,
+        "total_requests": 757861,
+        "errors": 0,
+        "transfer_per_sec": "11.40MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 60994.4,
+        "avg_latency_ms": 0.168,
+        "max_latency_ms": 12.22,
+        "stdev_latency_ms": 0.284,
+        "total_requests": 616015,
+        "errors": 0,
+        "transfer_per_sec": "9.19MB"
+      }
+    },
+    {
+      "framework": "pyre_hybrid",
+      "scenario_id": "p2",
+      "scenario_name": "numpy mean(10k)",
+      "group": "python",
+      "high_concurrency": {
+        "req_per_sec": 8670.88,
+        "avg_latency_ms": 29.4,
+        "max_latency_ms": 88.85,
+        "stdev_latency_ms": 13.2,
+        "total_requests": 87599,
+        "errors": 0,
+        "transfer_per_sec": "1.32MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 8860.12,
+        "avg_latency_ms": 1.13,
+        "max_latency_ms": 8.47,
+        "stdev_latency_ms": 0.306,
+        "total_requests": 89484,
+        "errors": 0,
+        "transfer_per_sec": "1.35MB"
+      }
+    },
+    {
+      "framework": "pyre_hybrid",
+      "scenario_id": "p3",
+      "scenario_name": "numpy SVD 100x100",
+      "group": "python",
+      "high_concurrency": {
+        "req_per_sec": 4077.94,
+        "avg_latency_ms": 62.62,
+        "max_latency_ms": 205.03,
+        "stdev_latency_ms": 28.49,
+        "total_requests": 40841,
+        "errors": 0,
+        "transfer_per_sec": "561.51KB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 4148.97,
+        "avg_latency_ms": 2.41,
+        "max_latency_ms": 12.95,
+        "stdev_latency_ms": 0.439,
+        "total_requests": 41914,
+        "errors": 0,
+        "transfer_per_sec": "571.29KB"
+      }
+    },
+    {
+      "framework": "pyre_hybrid",
+      "scenario_id": "i1",
+      "scenario_name": "sleep(1ms)",
+      "group": "io",
+      "high_concurrency": {
+        "req_per_sec": 7893.96,
+        "avg_latency_ms": 32.28,
+        "max_latency_ms": 49.43,
+        "stdev_latency_ms": 2.04,
+        "total_requests": 79060,
+        "errors": 0,
+        "transfer_per_sec": "1.11MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 7057.95,
+        "avg_latency_ms": 1.43,
+        "max_latency_ms": 23.86,
+        "stdev_latency_ms": 0.706,
+        "total_requests": 70769,
+        "errors": 0,
+        "transfer_per_sec": "1.00MB"
+      }
+    },
+    {
+      "framework": "pyre_hybrid",
+      "scenario_id": "j1",
+      "scenario_name": "Parse 41B JSON",
+      "group": "json",
+      "high_concurrency": {
+        "req_per_sec": 212182.16,
+        "avg_latency_ms": 0.95,
+        "max_latency_ms": 40.85,
+        "stdev_latency_ms": 0.97,
+        "total_requests": 2126479,
+        "errors": 0,
+        "transfer_per_sec": "36.22MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 118324.32,
+        "avg_latency_ms": 0.092,
+        "max_latency_ms": 11.73,
+        "stdev_latency_ms": 0.333,
+        "total_requests": 1195040,
+        "errors": 0,
+        "transfer_per_sec": "20.20MB"
+      }
+    },
+    {
+      "framework": "pyre_hybrid",
+      "scenario_id": "j2",
+      "scenario_name": "Parse 7KB JSON",
+      "group": "json",
+      "high_concurrency": {
+        "req_per_sec": 95060.81,
+        "avg_latency_ms": 2.64,
+        "max_latency_ms": 44.19,
+        "stdev_latency_ms": 1.05,
+        "total_requests": 951452,
+        "errors": 0,
+        "transfer_per_sec": "13.78MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 69156.54,
+        "avg_latency_ms": 0.141,
+        "max_latency_ms": 6.62,
+        "stdev_latency_ms": 0.179,
+        "total_requests": 698479,
+        "errors": 0,
+        "transfer_per_sec": "10.02MB"
+      }
+    },
+    {
+      "framework": "pyre_hybrid",
+      "scenario_id": "j3",
+      "scenario_name": "Parse 93KB JSON",
+      "group": "json",
+      "high_concurrency": {
+        "req_per_sec": 9720.86,
+        "avg_latency_ms": 26.33,
+        "max_latency_ms": 151.25,
+        "stdev_latency_ms": 5.27,
+        "total_requests": 97479,
+        "errors": 0,
+        "transfer_per_sec": "1.41MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 9861.14,
+        "avg_latency_ms": 1.04,
+        "max_latency_ms": 33.85,
+        "stdev_latency_ms": 0.688,
+        "total_requests": 98635,
+        "errors": 0,
+        "transfer_per_sec": "1.43MB"
+      }
+    },
+    {
+      "framework": "robyn",
+      "scenario_id": "t1",
+      "scenario_name": "Hello World",
+      "group": "basic",
+      "high_concurrency": {
+        "req_per_sec": 83849.32,
+        "avg_latency_ms": 25.96,
+        "max_latency_ms": 386.09,
+        "stdev_latency_ms": 47.82,
+        "total_requests": 844181,
+        "errors": 0,
+        "transfer_per_sec": "8.48MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 55410.47,
+        "avg_latency_ms": 0.225,
+        "max_latency_ms": 28.3,
+        "stdev_latency_ms": 0.725,
+        "total_requests": 554336,
+        "errors": 0,
+        "transfer_per_sec": "5.60MB"
+      }
+    },
+    {
+      "framework": "robyn",
+      "scenario_id": "t2",
+      "scenario_name": "JSON small (3 fields)",
+      "group": "basic",
+      "high_concurrency": {
+        "req_per_sec": 82737.01,
+        "avg_latency_ms": 22.28,
+        "max_latency_ms": 275.5,
+        "stdev_latency_ms": 38.24,
+        "total_requests": 831708,
+        "errors": 0,
+        "transfer_per_sec": "11.28MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 51149.56,
+        "avg_latency_ms": 0.218,
+        "max_latency_ms": 14.34,
+        "stdev_latency_ms": 0.373,
+        "total_requests": 516582,
+        "errors": 0,
+        "transfer_per_sec": "6.98MB"
+      }
+    },
+    {
+      "framework": "robyn",
+      "scenario_id": "t3",
+      "scenario_name": "JSON medium (100 users)",
+      "group": "basic",
+      "high_concurrency": {
+        "req_per_sec": 39461.83,
+        "avg_latency_ms": 17.77,
+        "max_latency_ms": 179.15,
+        "stdev_latency_ms": 28.5,
+        "total_requests": 394962,
+        "errors": 0,
+        "transfer_per_sec": "282.67MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 28020.37,
+        "avg_latency_ms": 0.446,
+        "max_latency_ms": 37.96,
+        "stdev_latency_ms": 1.31,
+        "total_requests": 280226,
+        "errors": 0,
+        "transfer_per_sec": "200.71MB"
+      }
+    },
+    {
+      "framework": "robyn",
+      "scenario_id": "t4",
+      "scenario_name": "JSON large (500 records)",
+      "group": "basic",
+      "high_concurrency": {
+        "req_per_sec": 4714.7,
+        "avg_latency_ms": 72.5,
+        "max_latency_ms": 379.39,
+        "stdev_latency_ms": 75.26,
+        "total_requests": 47260,
+        "errors": 0,
+        "transfer_per_sec": "420.21MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 3452.42,
+        "avg_latency_ms": 3.07,
+        "max_latency_ms": 100.23,
+        "stdev_latency_ms": 2.93,
+        "total_requests": 34876,
+        "errors": 0,
+        "transfer_per_sec": "307.71MB"
+      }
+    },
+    {
+      "framework": "robyn",
+      "scenario_id": "c1",
+      "scenario_name": "fib(10)",
+      "group": "cpu",
+      "high_concurrency": {
+        "req_per_sec": 77316.94,
+        "avg_latency_ms": 28.09,
+        "max_latency_ms": 299.87,
+        "stdev_latency_ms": 47.22,
+        "total_requests": 778067,
+        "errors": 0,
+        "transfer_per_sec": "8.55MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 53740.66,
+        "avg_latency_ms": 0.189,
+        "max_latency_ms": 6.4,
+        "stdev_latency_ms": 0.16,
+        "total_requests": 542754,
+        "errors": 0,
+        "transfer_per_sec": "5.95MB"
+      }
+    },
+    {
+      "framework": "robyn",
+      "scenario_id": "c2",
+      "scenario_name": "fib(20)",
+      "group": "cpu",
+      "high_concurrency": {
+        "req_per_sec": 9938.34,
+        "avg_latency_ms": 34.33,
+        "max_latency_ms": 205.43,
+        "stdev_latency_ms": 35.45,
+        "total_requests": 99509,
+        "errors": 0,
+        "transfer_per_sec": "1.12MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 7831.11,
+        "avg_latency_ms": 1.37,
+        "max_latency_ms": 42.27,
+        "stdev_latency_ms": 1.33,
+        "total_requests": 78320,
+        "errors": 0,
+        "transfer_per_sec": "0.88MB"
+      }
+    },
+    {
+      "framework": "robyn",
+      "scenario_id": "c3",
+      "scenario_name": "fib(30)",
+      "group": "cpu",
+      "high_concurrency": {
+        "req_per_sec": 79.16,
+        "avg_latency_ms": 1070.0,
+        "max_latency_ms": 1970.0,
+        "stdev_latency_ms": 531.97,
+        "total_requests": 795,
+        "errors": 0,
+        "transfer_per_sec": "9.28KB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 57.98,
+        "avg_latency_ms": 175.2,
+        "max_latency_ms": 1260.0,
+        "stdev_latency_ms": 134.67,
+        "total_requests": 581,
+        "errors": 0,
+        "transfer_per_sec": "6.79KB"
+      }
+    },
+    {
+      "framework": "robyn",
+      "scenario_id": "p1",
+      "scenario_name": "Pure Python sum(10k)",
+      "group": "python",
+      "high_concurrency": {
+        "req_per_sec": 38074.12,
+        "avg_latency_ms": 22.53,
+        "max_latency_ms": 184.3,
+        "stdev_latency_ms": 34.61,
+        "total_requests": 381068,
+        "errors": 0,
+        "transfer_per_sec": "4.43MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 25119.62,
+        "avg_latency_ms": 0.425,
+        "max_latency_ms": 11.8,
+        "stdev_latency_ms": 0.371,
+        "total_requests": 253697,
+        "errors": 0,
+        "transfer_per_sec": "2.92MB"
+      }
+    },
+    {
+      "framework": "robyn",
+      "scenario_id": "p2",
+      "scenario_name": "numpy mean(10k)",
+      "group": "python",
+      "high_concurrency": {
+        "req_per_sec": 29731.29,
+        "avg_latency_ms": 29.26,
+        "max_latency_ms": 299.62,
+        "stdev_latency_ms": 41.78,
+        "total_requests": 297461,
+        "errors": 0,
+        "transfer_per_sec": "3.82MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 22287.35,
+        "avg_latency_ms": 0.506,
+        "max_latency_ms": 28.05,
+        "stdev_latency_ms": 0.89,
+        "total_requests": 225115,
+        "errors": 0,
+        "transfer_per_sec": "2.86MB"
+      }
+    },
+    {
+      "framework": "robyn",
+      "scenario_id": "p3",
+      "scenario_name": "numpy SVD 100x100",
+      "group": "python",
+      "high_concurrency": {
+        "req_per_sec": 5062.1,
+        "avg_latency_ms": 61.23,
+        "max_latency_ms": 340.57,
+        "stdev_latency_ms": 58.49,
+        "total_requests": 50877,
+        "errors": 0,
+        "transfer_per_sec": "573.44KB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 3395.18,
+        "avg_latency_ms": 2.97,
+        "max_latency_ms": 31.0,
+        "stdev_latency_ms": 1.42,
+        "total_requests": 34341,
+        "errors": 0,
+        "transfer_per_sec": "384.61KB"
+      }
+    },
+    {
+      "framework": "robyn",
+      "scenario_id": "i1",
+      "scenario_name": "sleep(1ms)",
+      "group": "io",
+      "high_concurrency": {
+        "req_per_sec": 73593.53,
+        "avg_latency_ms": 4.65,
+        "max_latency_ms": 140.29,
+        "stdev_latency_ms": 6.92,
+        "total_requests": 740019,
+        "errors": 0,
+        "transfer_per_sec": "7.23MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 6580.42,
+        "avg_latency_ms": 1.52,
+        "max_latency_ms": 11.09,
+        "stdev_latency_ms": 0.358,
+        "total_requests": 66512,
+        "errors": 0,
+        "transfer_per_sec": "661.90KB"
+      }
+    },
+    {
+      "framework": "robyn",
+      "scenario_id": "j1",
+      "scenario_name": "Parse 41B JSON",
+      "group": "json",
+      "high_concurrency": {
+        "req_per_sec": 67946.28,
+        "avg_latency_ms": 19.3,
+        "max_latency_ms": 253.49,
+        "stdev_latency_ms": 33.82,
+        "total_requests": 686382,
+        "errors": 0,
+        "transfer_per_sec": "9.27MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 45336.45,
+        "avg_latency_ms": 0.257,
+        "max_latency_ms": 32.52,
+        "stdev_latency_ms": 0.781,
+        "total_requests": 457882,
+        "errors": 0,
+        "transfer_per_sec": "6.18MB"
+      }
+    },
+    {
+      "framework": "robyn",
+      "scenario_id": "j2",
+      "scenario_name": "Parse 7KB JSON",
+      "group": "json",
+      "high_concurrency": {
+        "req_per_sec": 44853.89,
+        "avg_latency_ms": 16.77,
+        "max_latency_ms": 220.39,
+        "stdev_latency_ms": 27.76,
+        "total_requests": 449133,
+        "errors": 0,
+        "transfer_per_sec": "4.96MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 29911.81,
+        "avg_latency_ms": 0.341,
+        "max_latency_ms": 8.7,
+        "stdev_latency_ms": 0.245,
+        "total_requests": 302109,
+        "errors": 0,
+        "transfer_per_sec": "3.31MB"
+      }
+    },
+    {
+      "framework": "robyn",
+      "scenario_id": "j3",
+      "scenario_name": "Parse 93KB JSON",
+      "group": "json",
+      "high_concurrency": {
+        "req_per_sec": 7849.14,
+        "avg_latency_ms": 65.99,
+        "max_latency_ms": 778.97,
+        "stdev_latency_ms": 85.58,
+        "total_requests": 78762,
+        "errors": 0,
+        "transfer_per_sec": "0.87MB"
+      },
+      "low_concurrency": {
+        "req_per_sec": 5540.01,
+        "avg_latency_ms": 1.92,
+        "max_latency_ms": 44.39,
+        "stdev_latency_ms": 1.72,
+        "total_requests": 55402,
+        "errors": 0,
+        "transfer_per_sec": "627.58KB"
+      }
+    }
+  ]
+}

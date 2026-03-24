@@ -146,6 +146,7 @@ pub(crate) async fn handle_request(
 pub(crate) async fn handle_request_subinterp(
     req: Request<Incoming>,
     pool: SharedPool,
+    routes: SharedRoutes,
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
     let method = req.method().to_string();
     let uri = req.uri().clone();
@@ -174,6 +175,35 @@ pub(crate) async fn handle_request_subinterp(
         None => return Ok(not_found_response()),
     };
 
+    // ── Hybrid dispatch: GIL routes use main interpreter ──
+    let is_gil_route = pool.requires_gil.get(handler_idx).copied().unwrap_or(false);
+
+    if is_gil_route {
+        // Route to main interpreter (full C extension support)
+        let sky_req = SkyRequest {
+            method,
+            path,
+            params,
+            query,
+            headers,
+            body_bytes,
+        };
+
+        let result: Result<ResponseData, String> = Python::attach(|py| {
+            let table = routes.read();
+            let handler = table.handlers[handler_idx].clone_ref(py);
+            drop(table);
+
+            match handler.call1(py, (sky_req,)) {
+                Ok(obj) => extract_response_data(py, obj.bind(py).clone()),
+                Err(e) => Err(format!("handler error: {e}")),
+            }
+        });
+
+        return build_response(result);
+    }
+
+    // ── Default: sub-interpreter (fast path) ──
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
     if let Err(e) = pool.submit(interp::WorkRequest {
@@ -207,7 +237,7 @@ pub(crate) async fn handle_request_subinterp(
             let mut builder = Response::builder()
                 .status(status)
                 .header("content-type", &ct)
-                .header("server", "Pyre/0.3.0-subinterp");
+                .header("server", "Pyre/0.3.1-subinterp");
             for (k, v) in &resp.headers {
                 builder = builder.header(k.as_str(), v.as_str());
             }

@@ -38,37 +38,37 @@ class Pyre:
     # Route registration (decorator + direct call)
     # ------------------------------------------------------------------
 
-    def get(self, path: str, handler: Callable | None = None):
-        return self._route("GET", path, handler)
+    def get(self, path: str, handler: Callable | None = None, *, gil: bool = False):
+        return self._route("GET", path, handler, gil=gil)
 
-    def post(self, path: str, handler: Callable | None = None):
-        return self._route("POST", path, handler)
+    def post(self, path: str, handler: Callable | None = None, *, gil: bool = False):
+        return self._route("POST", path, handler, gil=gil)
 
-    def put(self, path: str, handler: Callable | None = None):
-        return self._route("PUT", path, handler)
+    def put(self, path: str, handler: Callable | None = None, *, gil: bool = False):
+        return self._route("PUT", path, handler, gil=gil)
 
-    def delete(self, path: str, handler: Callable | None = None):
-        return self._route("DELETE", path, handler)
+    def delete(self, path: str, handler: Callable | None = None, *, gil: bool = False):
+        return self._route("DELETE", path, handler, gil=gil)
 
-    def patch(self, path: str, handler: Callable | None = None):
-        return self._route("PATCH", path, handler)
+    def patch(self, path: str, handler: Callable | None = None, *, gil: bool = False):
+        return self._route("PATCH", path, handler, gil=gil)
 
-    def options(self, path: str, handler: Callable | None = None):
-        return self._route("OPTIONS", path, handler)
+    def options(self, path: str, handler: Callable | None = None, *, gil: bool = False):
+        return self._route("OPTIONS", path, handler, gil=gil)
 
-    def head(self, path: str, handler: Callable | None = None):
-        return self._route("HEAD", path, handler)
+    def head(self, path: str, handler: Callable | None = None, *, gil: bool = False):
+        return self._route("HEAD", path, handler, gil=gil)
 
-    def route(self, method: str, path: str, handler: Callable | None = None):
-        return self._route(method.upper(), path, handler)
+    def route(self, method: str, path: str, handler: Callable | None = None, *, gil: bool = False):
+        return self._route(method.upper(), path, handler, gil=gil)
 
-    def _route(self, method: str, path: str, handler: Callable | None):
+    def _route(self, method: str, path: str, handler: Callable | None, *, gil: bool = False):
         if handler is not None:
-            self._engine.route(method, path, handler)
+            self._engine.route(method, path, handler, gil)
             return handler
 
         def decorator(fn: Callable) -> Callable:
-            self._engine.route(method, path, fn)
+            self._engine.route(method, path, fn, gil)
             return fn
 
         return decorator

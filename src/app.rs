@@ -31,35 +31,41 @@ impl SkyApp {
         }
     }
 
-    fn get(&mut self, path: &str, handler: Py<PyAny>, py: Python<'_>) -> PyResult<()> {
+    #[pyo3(signature = (path, handler, gil=false))]
+    fn get(&mut self, path: &str, handler: Py<PyAny>, gil: bool, py: Python<'_>) -> PyResult<()> {
         let name = handler.getattr(py, "__name__")?.extract::<String>(py)?;
-        self.add_route("GET", path, handler, name)
+        self.add_route("GET", path, handler, name, gil)
     }
 
-    fn post(&mut self, path: &str, handler: Py<PyAny>, py: Python<'_>) -> PyResult<()> {
+    #[pyo3(signature = (path, handler, gil=false))]
+    fn post(&mut self, path: &str, handler: Py<PyAny>, gil: bool, py: Python<'_>) -> PyResult<()> {
         let name = handler.getattr(py, "__name__")?.extract::<String>(py)?;
-        self.add_route("POST", path, handler, name)
+        self.add_route("POST", path, handler, name, gil)
     }
 
-    fn put(&mut self, path: &str, handler: Py<PyAny>, py: Python<'_>) -> PyResult<()> {
+    #[pyo3(signature = (path, handler, gil=false))]
+    fn put(&mut self, path: &str, handler: Py<PyAny>, gil: bool, py: Python<'_>) -> PyResult<()> {
         let name = handler.getattr(py, "__name__")?.extract::<String>(py)?;
-        self.add_route("PUT", path, handler, name)
+        self.add_route("PUT", path, handler, name, gil)
     }
 
-    fn delete(&mut self, path: &str, handler: Py<PyAny>, py: Python<'_>) -> PyResult<()> {
+    #[pyo3(signature = (path, handler, gil=false))]
+    fn delete(&mut self, path: &str, handler: Py<PyAny>, gil: bool, py: Python<'_>) -> PyResult<()> {
         let name = handler.getattr(py, "__name__")?.extract::<String>(py)?;
-        self.add_route("DELETE", path, handler, name)
+        self.add_route("DELETE", path, handler, name, gil)
     }
 
+    #[pyo3(signature = (method, path, handler, gil=false))]
     fn route(
         &mut self,
         method: &str,
         path: &str,
         handler: Py<PyAny>,
+        gil: bool,
         py: Python<'_>,
     ) -> PyResult<()> {
         let name = handler.getattr(py, "__name__")?.extract::<String>(py)?;
-        self.add_route(method, path, handler, name)
+        self.add_route(method, path, handler, name, gil)
     }
 
     fn before_request(&mut self, handler: Py<PyAny>, py: Python<'_>) -> PyResult<()> {
@@ -146,10 +152,11 @@ impl SkyApp {
         path: &str,
         handler: Py<PyAny>,
         handler_name: String,
+        gil: bool,
     ) -> PyResult<()> {
         let mut routes = self.routes.write();
         routes
-            .insert(method, path, handler, handler_name)
+            .insert(method, path, handler, handler_name, gil)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("route error: {e}")))?;
         Ok(())
     }
@@ -244,19 +251,24 @@ impl SkyApp {
             main_mod.getattr("__file__")?.extract::<String>()?
         };
 
-        let (handler_names, routers, before_hook_names, static_dirs) = {
+        let (handler_names, routers, before_hook_names, static_dirs, requires_gil) = {
             let table = routes.read();
             (
                 table.handler_names.clone(),
                 table.routers.clone(),
                 table.before_hook_names.clone(),
                 table.static_dirs.clone(),
+                table.requires_gil.clone(),
             )
         };
 
-        println!("\n  Pyre v0.3.0 [sub-interpreter mode]");
+        let gil_count = requires_gil.iter().filter(|&&g| g).count();
+        let subinterp_count = requires_gil.len() - gil_count;
+
+        println!("\n  Pyre v0.3.1 [hybrid mode]");
         println!("  Listening on http://{addr}");
         println!("  Sub-interpreters: {workers} (CPUs: {num_cpus})");
+        println!("  Routes: {subinterp_count} sub-interp + {gil_count} GIL");
         println!("  Script: {script_path}\n");
 
         let pool = unsafe {
@@ -268,6 +280,7 @@ impl SkyApp {
                 routers,
                 &before_hook_names,
                 static_dirs,
+                requires_gil,
             )
             .map_err(|e| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!(
@@ -305,12 +318,14 @@ impl SkyApp {
                             })?;
 
                             let pool = Arc::clone(&pool);
+                            let routes = Arc::clone(&routes);
                             let io = TokioIo::new(stream);
 
                             tokio::spawn(async move {
                                 let svc = service_fn(move |req: Request<Incoming>| {
                                     let pool = Arc::clone(&pool);
-                                    async move { handle_request_subinterp(req, pool).await }
+                                    let routes = Arc::clone(&routes);
+                                    async move { handle_request_subinterp(req, pool, routes).await }
                                 });
 
                                 if let Err(e) = http1::Builder::new()
