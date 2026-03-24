@@ -73,4 +73,8 @@ impl RouteTable {
 unsafe impl Send for RouteTable {}
 unsafe impl Sync for RouteTable {}
 
-pub(crate) type SharedRoutes = Arc<RwLock<RouteTable>>;
+/// Mutable during registration (before run).
+pub(crate) type MutableRoutes = Arc<RwLock<RouteTable>>;
+
+/// Frozen after startup — zero-lock reads on the hot path.
+pub(crate) type FrozenRoutes = Arc<RouteTable>;

@@ -13,13 +13,13 @@ use tokio::signal;
 
 use crate::handlers::{handle_request, handle_request_subinterp};
 use crate::interp;
-use crate::router::{RouteTable, SharedRoutes};
+use crate::router::{FrozenRoutes, MutableRoutes, RouteTable};
 use crate::state::SharedState;
 use crate::websocket;
 
 #[pyclass]
 pub(crate) struct SkyApp {
-    routes: SharedRoutes,
+    routes: MutableRoutes,
     script_path: Option<String>,
     shared_state: Arc<dashmap::DashMap<String, Vec<u8>>>,
 }
@@ -151,12 +151,31 @@ impl SkyApp {
             .unwrap_or(4);
         let workers = workers.unwrap_or(num_cpus);
 
-        let routes = Arc::clone(&self.routes);
+        // Freeze route table: extract from RwLock into read-only Arc.
+        // After this point, no more route registration — zero-lock reads.
+        let frozen: FrozenRoutes = {
+            let table = self.routes.read();
+            // Clone the RouteTable into a new Arc (no lock needed at runtime)
+            Arc::new(RouteTable {
+                handlers: table.handlers.iter().map(|h| h.clone_ref(py)).collect(),
+                handler_names: table.handler_names.clone(),
+                requires_gil: table.requires_gil.clone(),
+                routers: table.routers.clone(),
+                ws_handlers: table.ws_handlers.iter().map(|(k, v)| (k.clone(), v.clone_ref(py))).collect(),
+                before_hooks: table.before_hooks.iter().map(|h| h.clone_ref(py)).collect(),
+                after_hooks: table.after_hooks.iter().map(|h| h.clone_ref(py)).collect(),
+                before_hook_names: table.before_hook_names.clone(),
+                after_hook_names: table.after_hook_names.clone(),
+                fallback_handler: table.fallback_handler.as_ref().map(|h| h.clone_ref(py)),
+                fallback_handler_name: table.fallback_handler_name.clone(),
+                static_dirs: table.static_dirs.clone(),
+            })
+        };
 
         if mode == "subinterp" {
-            self.run_subinterp(py, addr, workers, num_cpus, routes)
+            self.run_subinterp(py, addr, workers, num_cpus, frozen)
         } else {
-            self.run_gil(py, addr, workers, num_cpus, routes)
+            self.run_gil(py, addr, workers, num_cpus, frozen)
         }
     }
 }
@@ -183,7 +202,7 @@ impl SkyApp {
         addr: SocketAddr,
         workers: usize,
         num_cpus: usize,
-        routes: SharedRoutes,
+        routes: FrozenRoutes,
     ) -> PyResult<()> {
         println!("\n  Pyre v0.3.0");
         println!("  Listening on http://{addr}");
@@ -266,7 +285,7 @@ impl SkyApp {
         addr: SocketAddr,
         workers: usize,
         num_cpus: usize,
-        routes: SharedRoutes,
+        routes: FrozenRoutes,
     ) -> PyResult<()> {
         let script_path = if let Some(ref p) = self.script_path {
             p.clone()
@@ -275,17 +294,14 @@ impl SkyApp {
             main_mod.getattr("__file__")?.extract::<String>()?
         };
 
-        let (handler_names, routers, before_hook_names, after_hook_names, static_dirs, requires_gil) = {
-            let table = routes.read();
-            (
-                table.handler_names.clone(),
-                table.routers.clone(),
-                table.before_hook_names.clone(),
-                table.after_hook_names.clone(),
-                table.static_dirs.clone(),
-                table.requires_gil.clone(),
-            )
-        };
+        let (handler_names, routers, before_hook_names, after_hook_names, static_dirs, requires_gil) = (
+            routes.handler_names.clone(),
+            routes.routers.clone(),
+            routes.before_hook_names.clone(),
+            routes.after_hook_names.clone(),
+            routes.static_dirs.clone(),
+            routes.requires_gil.clone(),
+        );
 
         let gil_count = requires_gil.iter().filter(|&&g| g).count();
         let subinterp_count = requires_gil.len() - gil_count;

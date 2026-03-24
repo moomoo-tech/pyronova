@@ -11,7 +11,7 @@ use pyo3::prelude::*;
 use tokio_tungstenite::WebSocketStream;
 use tungstenite::Message;
 
-use crate::router::SharedRoutes;
+use crate::router::FrozenRoutes;
 
 // ---------------------------------------------------------------------------
 // SkyWebSocket — Python-facing WebSocket connection object
@@ -83,14 +83,13 @@ fn ws_upgrade_response(key: &[u8]) -> Response<Full<Bytes>> {
 
 pub(crate) async fn handle_websocket(
     mut req: Request<Incoming>,
-    routes: SharedRoutes,
+    routes: FrozenRoutes,
 ) -> Result<Response<crate::handlers::BoxBody>, hyper::Error> {
     let path = req.uri().path().to_string();
 
     // Look up WebSocket handler (need GIL to clone Py<PyAny>)
     let handler = Python::attach(|py| {
-        let table = routes.read();
-        table.ws_handlers.get(&path).map(|h| h.clone_ref(py))
+        routes.ws_handlers.get(&path).map(|h| h.clone_ref(py))
     });
 
     let handler = match handler {

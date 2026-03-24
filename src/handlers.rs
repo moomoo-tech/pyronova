@@ -13,7 +13,7 @@ use crate::response::{
     build_response, error_response, extract_response_data, not_found_response,
     overloaded_response, payload_too_large_response,
 };
-use crate::router::SharedRoutes;
+use crate::router::FrozenRoutes;
 use crate::static_fs::try_static_file;
 use crate::stream::SkyStream;
 use crate::types::{extract_headers, ResponseData, SkyRequest, SkyResponse};
@@ -86,7 +86,7 @@ pub(crate) fn full_body(resp: Response<Full<Bytes>>) -> Response<BoxBody> {
 
 pub(crate) async fn handle_request(
     req: Request<Incoming>,
-    routes: SharedRoutes,
+    routes: FrozenRoutes,
 ) -> Result<Response<BoxBody>, hyper::Error> {
     let method = req.method().to_string();
     let uri = req.uri().clone();
@@ -101,17 +101,11 @@ pub(crate) async fn handle_request(
         Err(_) => return Ok(full_body(payload_too_large_response())),
     };
 
-    let (lookup, static_dirs, has_fallback) = {
-        let table = routes.read();
-        (
-            table.lookup(&method, &path),
-            table.static_dirs.clone(),
-            table.fallback_handler.is_some(),
-        )
-    };
+    let lookup = routes.lookup(&method, &path);
+    let has_fallback = routes.fallback_handler.is_some();
 
     if lookup.is_none() {
-        if let Some(resp) = try_static_file(&path, &static_dirs).await {
+        if let Some(resp) = try_static_file(&path, &routes.static_dirs).await {
             return Ok(full_body(resp));
         }
     }
@@ -149,23 +143,22 @@ pub(crate) async fn handle_request(
 // ---------------------------------------------------------------------------
 
 fn call_handler_with_hooks(
-    routes: SharedRoutes,
+    routes: FrozenRoutes,
     handler_idx: usize,
     sky_req: SkyRequest,
 ) -> HandlerResult {
     Python::attach(|py| {
-        let table = routes.read();
+        // FrozenRoutes: no lock needed — direct Arc<RouteTable> access
         let before_hooks: Vec<Py<PyAny>> =
-            table.before_hooks.iter().map(|h| h.clone_ref(py)).collect();
+            routes.before_hooks.iter().map(|h| h.clone_ref(py)).collect();
         let after_hooks: Vec<Py<PyAny>> =
-            table.after_hooks.iter().map(|h| h.clone_ref(py)).collect();
+            routes.after_hooks.iter().map(|h| h.clone_ref(py)).collect();
 
         let handler = if handler_idx == usize::MAX {
-            table.fallback_handler.as_ref().unwrap().clone_ref(py)
+            routes.fallback_handler.as_ref().unwrap().clone_ref(py)
         } else {
-            table.handlers[handler_idx].clone_ref(py)
+            routes.handlers[handler_idx].clone_ref(py)
         };
-        drop(table);
 
         // before_request hooks
         for hook in &before_hooks {
@@ -300,7 +293,7 @@ fn build_stream_response(info: StreamInfo) -> Response<BoxBody> {
 pub(crate) async fn handle_request_subinterp(
     req: Request<Incoming>,
     pool: SharedPool,
-    routes: SharedRoutes,
+    routes: FrozenRoutes,
 ) -> Result<Response<BoxBody>, hyper::Error> {
     let method = req.method().to_string();
     let uri = req.uri().clone();
