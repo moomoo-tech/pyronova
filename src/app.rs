@@ -214,7 +214,7 @@ impl SkyApp {
         num_cpus: usize,
         routes: FrozenRoutes,
     ) -> PyResult<()> {
-        println!("\n  Pyre v0.3.0");
+        println!("\n  Pyre v0.5.0");
         println!("  Listening on http://{addr}");
         println!("  Workers: {workers} (CPUs: {num_cpus})\n");
 
@@ -316,7 +316,7 @@ impl SkyApp {
         let gil_count = requires_gil.iter().filter(|&&g| g).count();
         let subinterp_count = requires_gil.len() - gil_count;
 
-        println!("\n  Pyre v0.3.1 [hybrid mode]");
+        println!("\n  Pyre v0.5.0 [hybrid mode]");
         println!("  Listening on http://{addr}");
         println!("  Sub-interpreters: {workers} (CPUs: {num_cpus})");
         println!("  Routes: {subinterp_count} sub-interp + {gil_count} GIL");

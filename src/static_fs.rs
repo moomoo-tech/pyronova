@@ -43,7 +43,7 @@ pub(crate) async fn try_static_file(
             return Some(
                 Response::builder()
                     .status(StatusCode::FORBIDDEN)
-                    .header("server", "Pyre/0.3.0")
+                    .header("server", "Pyre/0.5.0")
                     .body(Full::new(Bytes::from_static(b"forbidden")))
                     .unwrap(),
             );
@@ -59,7 +59,7 @@ pub(crate) async fn try_static_file(
                 Response::builder()
                     .status(StatusCode::OK)
                     .header("content-type", ct)
-                    .header("server", "Pyre/0.3.0")
+                    .header("server", "Pyre/0.5.0")
                     .body(Full::new(Bytes::from(contents)))
                     .unwrap(),
             );

@@ -4,4 +4,4 @@ from skytrade.engine import SkyApp, SkyRequest, SkyResponse, SkyWebSocket, Share
 from skytrade.app import Pyre
 
 __all__ = ["Pyre", "SkyApp", "SkyRequest", "SkyResponse", "SkyWebSocket", "SharedState", "SkyStream", "get_gil_metrics"]
-__version__ = "0.4.0"
+__version__ = "0.5.0"
