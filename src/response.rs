@@ -17,6 +17,16 @@ pub(crate) fn extract_response_data(
     py: Python<'_>,
     obj: Bound<'_, pyo3::PyAny>,
 ) -> Result<ResponseData, String> {
+    // Detect async def handlers — give a clear error instead of returning <coroutine>
+    if obj.get_type().name().map(|n| n.to_string()).unwrap_or_default() == "coroutine" {
+        return Err(
+            "async handlers are not supported. Use `def handler(req)` instead of \
+             `async def handler(req)`. Pyre uses real multi-threading (sub-interpreters), \
+             so async is not needed for concurrency."
+                .to_string(),
+        );
+    }
+
     // SkyResponse
     if let Ok(resp) = obj.downcast::<SkyResponse>() {
         let resp = resp.get();
