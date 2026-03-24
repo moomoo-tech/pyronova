@@ -225,23 +225,22 @@ asyncpg/aiohttp: 可用          (Python async 生态兼容)
 内存:            保持 67MB      (不引入多进程)
 ```
 
-## Phase 8 — 跨子解释器状态共享 (SharedState)
+## Phase 8 — 跨子解释器状态共享 (DONE ✓) — 2026-03-24
 
 核心问题：PEP 684 子解释器内存隔离，10 个子解释器中的 `GLOBAL_CACHE = {}` 是 10 个独立的空字典。
 
 ### 设计原则
 
-1. **状态下沉到 Rust** — Python 只是调用方，共享数据结构在 Rust 堆上
+1. **状态下沉到 Rust** — Python 只是调用方，共享数据在 Rust 堆上
 2. **绝不跨解释器共享 PyObject** — 边界处 Rust 原生类型 ↔ Python 对象互转
 3. **无锁高并发** — `DashMap` 分片锁，不同 Key 零竞争
 
-### 实现方案
+### 实现 (src/state.rs)
 
 ```rust
-// Rust: 高并发共享字典
 #[pyclass]
 pub struct SharedState {
-    inner: Arc<DashMap<String, String>>,  // 或 Vec<u8> 支持二进制
+    inner: Arc<DashMap<String, Vec<u8>>>,  // 支持 string + binary
 }
 ```
 
@@ -249,7 +248,61 @@ pub struct SharedState {
 # Python: 像普通字典一样使用
 app.state["session:user_123"] = json.dumps({"role": "admin"})
 session = json.loads(app.state["session:user_123"])
+len(app.state)          # 条目数
+"key" in app.state      # 判断存在
+del app.state["key"]    # 删除
+app.state.keys()        # 所有 key
+app.state.set_bytes()   # 二进制写入
+app.state.get_bytes()   # 二进制读取
 ```
+
+### 用例
+
+**Session 管理（零 Redis）：**
+```python
+@app.get("/login/{user}", gil=True)
+def login(req):
+    app.state[f"session:{req.params['user']}"] = json.dumps({"token": "xyz"})
+    return {"ok": True}
+
+@app.get("/auth/{user}", gil=True)
+def auth(req):
+    try:
+        return json.loads(app.state[f"session:{req.params['user']}"])
+    except KeyError:
+        return SkyResponse(body={"error": "unauthorized"}, status_code=401)
+```
+
+**跨路由数据共享（numpy 计算结果 → 其他路由读取）：**
+```python
+@app.get("/compute", gil=True)
+def compute(req):
+    import numpy as np
+    result = float(np.mean(np.random.randn(10000)))
+    app.state["latest_mean"] = json.dumps({"mean": result})
+    return {"computed": True}
+
+@app.get("/latest", gil=True)
+def latest(req):
+    return json.loads(app.state["latest_mean"])
+```
+
+**实时计数器：**
+```python
+@app.get("/hit", gil=True)
+def hit_counter(req):
+    count = int(app.state.get("hits") or "0") + 1
+    app.state["hits"] = str(count)
+    return {"hits": count}
+```
+
+### 性能
+
+| 操作 | 吞吐量 | 延迟 |
+|------|--------|------|
+| state read (GIL route) | 73,720 req/s | 4.4ms avg |
+| state write | 同级 | 纳秒级 DashMap 插入 |
+| sub-interp fast route (同时) | 214,841 req/s | 0.96ms avg |
 
 ### 架构优势 vs Redis
 
@@ -260,12 +313,12 @@ session = json.loads(app.state["session:user_123"])
 | 数据类型 | String / bytes | 丰富但有序列化开销 |
 | 适用场景 | Session、缓存、计数器 | 分布式、持久化 |
 
-### 拓展路线
+### 当前限制 & 拓展路线
 
-1. `DashMap<String, String>` — 基础 KV（JSON 序列化）
-2. `DashMap<String, Vec<u8>>` — 二进制共享池（行情数据、Tensor）
-3. `moka` Cache — 带 TTL 过期的缓存（Session 自动清理）
-4. 通过 `app.state` 暴露给 Python，所有子解释器共享同一个 Arc
+- 当前：`app.state` 需要 `gil=True` 路由（PyO3 pyclass 不可在子解释器中直接使用）
+- 计划：通过 FFI 注入 `_state` 到子解释器 globals，实现原生 sub-interp 访问
+- 拓展 1：`moka` Cache — 带 TTL 过期（Session 自动清理）
+- 拓展 2：`app.state.set_bytes()` 共享二进制数据（行情 Tensor）
 
 ## 长期愿景
 - 成为第一个同时支持 free-threaded 和 per-interpreter GIL 的 Python web 框架
@@ -285,3 +338,4 @@ session = json.loads(app.state["session:user_123"])
 | 2026-03-24 | v0.3.1 | 215k | 104k | 83k | Phase 5.1: RAII + channel pool + 模块化拆分 + 安全修复 |
 | 2026-03-24 | v0.4.0 | 215k | 104k | 83k | Phase 6: Native WebSocket + Hybrid GIL + 全面压测(54场景) |
 | 2026-03-24 | v0.4.0+ | 217k | 78k(47k IO) | 81k | spawn_blocking + 背压 + TCP_NODELAY, GIL IO +535%, 胜10/14场景 |
+| 2026-03-24 | v0.5.0 | — | 74k state | — | Phase 7 async + Phase 8 SharedState + DX (.pyi, async detect) |
