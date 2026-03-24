@@ -22,6 +22,28 @@ type SharedPool = Arc<interp::InterpreterPool>;
 /// Max request body size (10 MB)
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
 
+/// If `obj` is a coroutine (from `async def`), execute it via a thread-local
+/// asyncio event loop. Otherwise return it unchanged.
+fn resolve_coroutine(py: Python<'_>, obj: Py<PyAny>) -> Result<Py<PyAny>, String> {
+    let bound = obj.bind(py);
+    let is_coro = unsafe { pyo3::ffi::PyCoro_CheckExact(bound.as_ptr()) == 1 };
+    if !is_coro {
+        return Ok(obj);
+    }
+    // Use thread-local persistent event loop (avoids asyncio.run() overhead
+    // of creating + destroying a loop per request)
+    let asyncio = py.import("asyncio").map_err(|e| format!("import asyncio: {e}"))?;
+
+    // Use asyncio.run() — creates a temporary event loop per call.
+    // Each spawn_blocking thread can run asyncio concurrently since
+    // asyncio releases GIL during I/O waits.
+    let result = asyncio
+        .call_method1("run", (bound,))
+        .map_err(|e| format!("asyncio.run error: {e}"))?;
+
+    Ok(result.unbind())
+}
+
 // ---------------------------------------------------------------------------
 // GIL mode handler
 // ---------------------------------------------------------------------------
@@ -122,6 +144,8 @@ fn call_handler_with_hooks(
         // Main handler
         match handler.call1(py, (sky_req.clone(),)) {
             Ok(obj) => {
+                // If handler returned a coroutine (async def), run it via asyncio
+                let obj = resolve_coroutine(py, obj)?;
                 let mut resp_data = extract_response_data(py, obj.bind(py).clone())?;
 
                 // after_request hooks

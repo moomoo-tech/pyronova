@@ -250,6 +250,10 @@ struct SubInterpreterWorker {
     sky_request_cls: *mut ffi::PyObject,
     /// Cached: _SkyResponse class pointer
     sky_response_cls: *mut ffi::PyObject,
+    /// Cached: persistent asyncio event loop for this sub-interpreter
+    asyncio_loop: *mut ffi::PyObject,
+    /// Cached: loop.run_until_complete method
+    loop_run_func: *mut ffi::PyObject,
 }
 
 unsafe impl Send for SubInterpreterWorker {}
@@ -393,6 +397,36 @@ class _SkyResponse:
             }
         };
 
+        // Create persistent asyncio event loop for this sub-interpreter
+        let (asyncio_loop, loop_run_func) = {
+            let asyncio_mod = ffi::PyImport_ImportModule(c"asyncio".as_ptr());
+            if !asyncio_mod.is_null() {
+                let loop_obj = ffi::PyObject_CallMethod(
+                    asyncio_mod,
+                    c"new_event_loop".as_ptr(),
+                    std::ptr::null(),
+                );
+                let run_func = if !loop_obj.is_null() {
+                    // Set as current loop
+                    ffi::PyObject_CallMethod(
+                        asyncio_mod,
+                        c"set_event_loop".as_ptr(),
+                        c"O".as_ptr(),
+                        loop_obj,
+                    );
+                    ffi::PyObject_GetAttrString(loop_obj, c"run_until_complete".as_ptr())
+                } else {
+                    ffi::PyErr_Clear();
+                    std::ptr::null_mut()
+                };
+                ffi::Py_DECREF(asyncio_mod);
+                (loop_obj, run_func)
+            } else {
+                ffi::PyErr_Clear();
+                (std::ptr::null_mut(), std::ptr::null_mut())
+            }
+        };
+
         // Keep globals alive — transfer ownership to the struct
         let globals_ptr = globals.into_raw();
 
@@ -409,6 +443,8 @@ class _SkyResponse:
             json_dumps_func,
             sky_request_cls,
             sky_response_cls,
+            asyncio_loop,
+            loop_run_func,
         })
     }
 
@@ -510,6 +546,33 @@ class _SkyResponse:
             headers: HashMap::new(),
             is_json: false,
         })
+    }
+
+    /// If obj is a coroutine (async def), execute it via persistent event loop.
+    /// Otherwise return it unchanged.
+    unsafe fn resolve_coroutine(&self, obj: PyObjRef) -> Result<PyObjRef, String> {
+        if ffi::PyCoro_CheckExact(obj.as_ptr()) != 1 {
+            return Ok(obj); // Not a coroutine, pass through
+        }
+        if self.loop_run_func.is_null() {
+            return Err("async handler used but asyncio event loop not available".to_string());
+        }
+        // Call loop.run_until_complete(coroutine)
+        let args = PyObjRef::from_owned(ffi::PyTuple_New(1))
+            .ok_or("failed to create args tuple")?;
+        ffi::PyTuple_SetItem(args.as_ptr(), 0, obj.into_raw());
+        let result = PyObjRef::from_owned(ffi::PyObject_Call(
+            self.loop_run_func,
+            args.as_ptr(),
+            std::ptr::null_mut(),
+        ));
+        match result {
+            Some(r) => Ok(r),
+            None => {
+                ffi::PyErr_Print();
+                Err("loop.run_until_complete() failed".to_string())
+            }
+        }
     }
 
     /// Serialize a Python dict/list to JSON string via cached dumps (orjson or json).
@@ -709,7 +772,11 @@ class _SkyResponse:
         // call_args dropped → DECREF
 
         match result_obj {
-            Some(r) => self.parse_result(r),
+            Some(r) => {
+                // If handler returned a coroutine (async def), run via asyncio.run()
+                let resolved = self.resolve_coroutine(r)?;
+                self.parse_result(resolved)
+            }
             None => {
                 ffi::PyErr_Print();
                 Err("handler raised an exception".to_string())
