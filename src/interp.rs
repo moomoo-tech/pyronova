@@ -268,7 +268,7 @@ impl SubInterpreterWorker {
             allow_exec: 0,
             allow_threads: 1,
             allow_daemon_threads: 0,
-            check_multi_interp_extensions: 1,
+            check_multi_interp_extensions: 1, // Strict: only extensions declaring multi-interp support
             gil: ffi::PyInterpreterConfig_OWN_GIL,
         };
 
