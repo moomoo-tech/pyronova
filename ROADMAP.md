@@ -170,6 +170,17 @@ def echo(ws):
         ws.send(f"echo: {msg}")
 ```
 
+### 性能与安全加固 (DONE ✓) — 2026-03-24
+
+- [x] `spawn_blocking` 隔离 GIL 调用，避免 Tokio Worker 线程饥饿
+- [x] 有界通道 (bounded channel) + `try_send` 背压 → 503 快速失败
+- [x] `TCP_NODELAY` 禁用 Nagle 算法
+- [x] 请求体 10MB 上限 → 413 Payload Too Large
+- [x] orjson 自动检测（10-40x JSON 序列化加速）
+- [x] async def 检测 → 清晰错误消息（非静默 `<coroutine>` 返回）
+- [x] Type stubs (`engine.pyi`) → IDE 自动补全
+- [x] `call_handler_with_hooks()` 共享函数消除代码重复
+
 ### 待完成
 - [ ] HTTP/2（deps 里已有 hyper http2 feature）
 - [ ] io_uring backend (Linux, monoio)
@@ -177,6 +188,8 @@ def echo(ws):
 - [ ] Native gRPC (tonic crate, Robyn 不支持)
 - [ ] WebSocket 二进制消息支持
 - [ ] WebSocket 子解释器模式（当前走 GIL）
+- [ ] AST 过滤替换为环境变量方案
+- [ ] Pydantic 自动绑定
 
 ## 长期愿景
 - 成为第一个同时支持 free-threaded 和 per-interpreter GIL 的 Python web 框架
