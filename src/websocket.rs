@@ -14,30 +14,83 @@ use tungstenite::Message;
 use crate::router::FrozenRoutes;
 
 // ---------------------------------------------------------------------------
+// Channel message type
+// ---------------------------------------------------------------------------
+
+enum WsMsg {
+    Text(String),
+    Binary(Vec<u8>),
+}
+
+// ---------------------------------------------------------------------------
 // SkyWebSocket — Python-facing WebSocket connection object
 // ---------------------------------------------------------------------------
 
 #[pyclass]
 pub(crate) struct SkyWebSocket {
-    /// Receive messages from client (async → sync bridge)
-    incoming_rx: std::sync::Mutex<std::sync::mpsc::Receiver<String>>,
-    /// Send messages to client (sync → async bridge)
-    outgoing_tx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>,
+    incoming_rx: std::sync::Mutex<std::sync::mpsc::Receiver<WsMsg>>,
+    outgoing_tx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<WsMsg>>>,
 }
 
 #[pymethods]
 impl SkyWebSocket {
-    /// Receive next message from client. Returns None if connection closed.
+    /// Receive next text message. Returns None if connection closed.
     fn recv(&self) -> Option<String> {
         let rx = self.incoming_rx.lock().unwrap();
-        rx.recv().ok()
+        loop {
+            match rx.recv().ok()? {
+                WsMsg::Text(s) => return Some(s),
+                WsMsg::Binary(_) => continue,
+            }
+        }
+    }
+
+    /// Receive next binary message. Returns None if connection closed.
+    fn recv_bytes(&self) -> Option<Vec<u8>> {
+        let rx = self.incoming_rx.lock().unwrap();
+        loop {
+            match rx.recv().ok()? {
+                WsMsg::Binary(b) => return Some(b),
+                WsMsg::Text(_) => continue,
+            }
+        }
+    }
+
+    /// Receive next message as (type, data). type is "text" or "binary".
+    /// Returns None if connection closed.
+    fn recv_message<'py>(&self, py: Python<'py>) -> Option<(String, Py<PyAny>)> {
+        let rx = self.incoming_rx.lock().unwrap();
+        let msg = rx.recv().ok()?;
+        match msg {
+            WsMsg::Text(s) => Some((
+                "text".to_string(),
+                s.into_pyobject(py).unwrap().into_any().unbind(),
+            )),
+            WsMsg::Binary(b) => Some((
+                "binary".to_string(),
+                pyo3::types::PyBytes::new(py, &b).into_any().unbind(),
+            )),
+        }
     }
 
     /// Send a text message to the client.
     fn send(&self, msg: &str) -> PyResult<()> {
         let tx = self.outgoing_tx.lock().unwrap();
         match tx.as_ref() {
-            Some(tx) => tx.send(msg.to_string()).map_err(|_| {
+            Some(tx) => tx.send(WsMsg::Text(msg.to_string())).map_err(|_| {
+                pyo3::exceptions::PyConnectionError::new_err("WebSocket closed")
+            }),
+            None => Err(pyo3::exceptions::PyConnectionError::new_err(
+                "WebSocket closed",
+            )),
+        }
+    }
+
+    /// Send a binary message to the client.
+    fn send_bytes(&self, data: Vec<u8>) -> PyResult<()> {
+        let tx = self.outgoing_tx.lock().unwrap();
+        match tx.as_ref() {
+            Some(tx) => tx.send(WsMsg::Binary(data)).map_err(|_| {
                 pyo3::exceptions::PyConnectionError::new_err("WebSocket closed")
             }),
             None => Err(pyo3::exceptions::PyConnectionError::new_err(
@@ -49,7 +102,7 @@ impl SkyWebSocket {
     /// Close the WebSocket connection.
     fn close(&self) {
         let mut tx = self.outgoing_tx.lock().unwrap();
-        *tx = None; // Drop the sender, which signals the async side to close
+        *tx = None;
     }
 }
 
@@ -150,13 +203,9 @@ where
 {
     let (mut ws_sink, mut ws_source) = ws_stream.split();
 
-    // Channels for async ↔ sync bridge
-    // incoming: async task → Python thread (client messages)
-    // outgoing: Python thread → async task (server messages)
-    let (incoming_tx, incoming_rx) = std::sync::mpsc::channel::<String>();
-    let (outgoing_tx, mut outgoing_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (incoming_tx, incoming_rx) = std::sync::mpsc::channel::<WsMsg>();
+    let (outgoing_tx, mut outgoing_rx) = tokio::sync::mpsc::unbounded_channel::<WsMsg>();
 
-    // Create the Python WebSocket object
     let sky_ws = SkyWebSocket {
         incoming_rx: std::sync::Mutex::new(incoming_rx),
         outgoing_tx: std::sync::Mutex::new(Some(outgoing_tx)),
@@ -179,12 +228,17 @@ where
             msg = ws_source.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        if incoming_tx.send(text.to_string()).is_err() {
-                            break; // Python handler exited
+                        if incoming_tx.send(WsMsg::Text(text.to_string())).is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Binary(data))) => {
+                        if incoming_tx.send(WsMsg::Binary(data.to_vec())).is_err() {
+                            break;
                         }
                     }
                     Some(Ok(Message::Close(_))) | None => {
-                        break; // Client closed
+                        break;
                     }
                     Some(Ok(Message::Ping(data))) => {
                         let _ = ws_sink.send(Message::Pong(data)).await;
@@ -193,19 +247,24 @@ where
                         eprintln!("WebSocket read error: {e}");
                         break;
                     }
-                    _ => {} // Binary, Pong
+                    _ => {} // Pong
                 }
             }
             // Python → Client (via outgoing_rx)
             msg = outgoing_rx.recv() => {
                 match msg {
-                    Some(text) => {
+                    Some(WsMsg::Text(text)) => {
                         if ws_sink.send(Message::Text(text.into())).await.is_err() {
-                            break; // Client disconnected
+                            break;
+                        }
+                    }
+                    Some(WsMsg::Binary(data)) => {
+                        if ws_sink.send(Message::Binary(data.into())).await.is_err() {
+                            break;
                         }
                     }
                     None => {
-                        break; // Python called close()
+                        break;
                     }
                 }
             }
