@@ -7,6 +7,7 @@ import sys
 from typing import Callable
 
 from skytrade.engine import SkyApp as _SkyApp, SkyResponse
+from skytrade.mcp import MCPServer
 
 
 class Pyre:
@@ -33,6 +34,12 @@ class Pyre:
         self._engine = _SkyApp()
         self._fallback_handler: Callable | None = None
         self._fallback_name: str | None = None
+        self._mcp = MCPServer()
+
+    @property
+    def mcp(self) -> MCPServer:
+        """MCP (Model Context Protocol) server for AI tool integration."""
+        return self._mcp
 
     @property
     def state(self):
@@ -210,4 +217,19 @@ class Pyre:
         workers: int | None = None,
         mode: str | None = None,
     ) -> None:
+        # Auto-register /mcp endpoint if any MCP handlers exist
+        if self._mcp._tools or self._mcp._resources or self._mcp._prompts:
+            mcp = self._mcp
+
+            def _mcp_handler(req):
+                body = req.text()
+                result = mcp.handle_request(body)
+                return SkyResponse(
+                    body=result,
+                    content_type="application/json",
+                )
+
+            self._engine.route("POST", "/mcp", _mcp_handler, True)  # gil=True
+            print(f"  MCP: {len(mcp._tools)} tools, {len(mcp._resources)} resources, {len(mcp._prompts)} prompts → POST /mcp")
+
         self._engine.run(host=host, port=port, workers=workers, mode=mode)
