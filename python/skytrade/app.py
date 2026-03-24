@@ -124,6 +124,22 @@ class Pyre:
     # Middleware
     # ------------------------------------------------------------------
 
+    def rpc(self, path: str, *, proto_model=None):
+        """Register an RPC endpoint with content negotiation.
+
+        Supports MsgPack, JSON, and optional Protobuf auto-decode/encode.
+
+        Usage::
+
+            @app.rpc("/rpc/get_data")
+            def get_data(req):
+                return {"prices": [150.1, 150.2]}
+        """
+        from skytrade.rpc import rpc_decorator
+        return rpc_decorator(self, path, proto_model)
+
+    # ------------------------------------------------------------------
+
     def before_request(self, handler: Callable | None = None):
         """Register a before-request hook. Use as decorator or direct call.
 

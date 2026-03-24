@@ -2,6 +2,7 @@
 
 from skytrade.engine import SkyApp, SkyRequest, SkyResponse, SkyWebSocket, SharedState, SkyStream, get_gil_metrics
 from skytrade.app import Pyre
+from skytrade.rpc import PyreRPCClient
 
 __all__ = ["Pyre", "SkyApp", "SkyRequest", "SkyResponse", "SkyWebSocket", "SharedState", "SkyStream", "get_gil_metrics"]
 __version__ = "1.0.0"
