@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use hyper::body::Incoming;
-use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::Request;
 use hyper_util::rt::TokioIo;
+use hyper_util::server::conn::auto::Builder as AutoBuilder;
 use pyo3::prelude::*;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
@@ -261,11 +261,8 @@ impl SkyApp {
                                     }
                                 });
 
-                                if let Err(e) = http1::Builder::new()
-                                    .keep_alive(true)
-                                    .pipeline_flush(true)
-                                    .serve_connection(io, svc)
-                                    .with_upgrades()
+                                if let Err(e) = AutoBuilder::new(hyper_util::rt::TokioExecutor::new())
+                                    .serve_connection_with_upgrades(io, svc)
                                     .await
                                 {
                                     let msg = e.to_string();
@@ -390,11 +387,8 @@ impl SkyApp {
                                     }
                                 });
 
-                                if let Err(e) = http1::Builder::new()
-                                    .keep_alive(true)
-                                    .pipeline_flush(true)
-                                    .serve_connection(io, svc)
-                                    .with_upgrades()
+                                if let Err(e) = AutoBuilder::new(hyper_util::rt::TokioExecutor::new())
+                                    .serve_connection_with_upgrades(io, svc)
                                     .await
                                 {
                                     let msg = e.to_string();
