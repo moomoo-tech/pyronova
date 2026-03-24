@@ -369,3 +369,4 @@ def hit_counter(req):
 | 2026-03-24 | v0.4.0+ | 217k | 78k(47k IO) | 81k | spawn_blocking + 背压 + TCP_NODELAY, GIL IO +535%, 胜10/14场景 |
 | 2026-03-24 | v0.5.0 | — | 74k state | — | Phase 7 async + Phase 8 SharedState + DX (.pyi, async detect) |
 | 2026-03-24 | v0.5.0+ | — | — | — | Phase 6: SSE streaming (SkyStream) for AI Agent token output |
+| 2026-03-24 | v0.5.0 | 217k/67MB | 53k/GIL=0μs | 81k/~440MB | GIL Watchdog + 内存监控, SubInterp GIL=0μs 验证, 内存 6.6x 优势 |
