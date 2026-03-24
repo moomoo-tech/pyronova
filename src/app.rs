@@ -208,6 +208,7 @@ impl SkyApp {
                             })?;
 
                             let routes = Arc::clone(&routes);
+                            let _ = stream.set_nodelay(true); // Disable Nagle for low latency
                             let io = TokioIo::new(stream);
 
                             tokio::spawn(async move {
@@ -333,6 +334,7 @@ impl SkyApp {
 
                             let pool = Arc::clone(&pool);
                             let routes = Arc::clone(&routes);
+                            let _ = stream.set_nodelay(true); // Disable Nagle for low latency
                             let io = TokioIo::new(stream);
 
                             tokio::spawn(async move {

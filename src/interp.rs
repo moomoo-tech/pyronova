@@ -763,7 +763,8 @@ impl InterpreterPool {
         all_func_names.dedup();
 
         // Create the shared work channel (multi-producer, multi-consumer)
-        let (work_tx, work_rx) = crossbeam_channel::unbounded::<WorkRequest>();
+        // Bounded channel: backpressure prevents OOM under load spikes
+        let (work_tx, work_rx) = crossbeam_channel::bounded::<WorkRequest>(n * 128);
 
         // Create N sub-interpreters and spawn worker threads
         let mut workers = Vec::new();
@@ -822,14 +823,22 @@ impl InterpreterPool {
         &self.handler_names[idx]
     }
 
-    /// Submit a work request. Returns a oneshot receiver for the response.
+    /// Submit a work request. Uses try_send for backpressure — returns error
+    /// if queue is full (caller should return 503).
     pub fn submit(
         &self,
         req: WorkRequest,
     ) -> Result<(), String> {
         self.work_tx
-            .send(req)
-            .map_err(|_| "worker pool channel closed".to_string())
+            .try_send(req)
+            .map_err(|e| match e {
+                crossbeam_channel::TrySendError::Full(_) => {
+                    "server overloaded".to_string()
+                }
+                crossbeam_channel::TrySendError::Disconnected(_) => {
+                    "worker pool channel closed".to_string()
+                }
+            })
     }
 }
 

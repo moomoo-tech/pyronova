@@ -154,6 +154,19 @@ pub(crate) fn error_response(msg: &str) -> Response<Full<Bytes>> {
 }
 
 #[inline]
+pub(crate) fn overloaded_response(msg: &str) -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(StatusCode::SERVICE_UNAVAILABLE)
+        .header("content-type", "application/json")
+        .header("server", "Pyre/0.4.0")
+        .header("retry-after", "1")
+        .body(Full::new(Bytes::from(
+            format!(r#"{{"error":"{}"}}"#, msg.replace('"', "\\\"")),
+        )))
+        .unwrap()
+}
+
+#[inline]
 pub(crate) fn payload_too_large_response() -> Response<Full<Bytes>> {
     Response::builder()
         .status(StatusCode::PAYLOAD_TOO_LARGE)

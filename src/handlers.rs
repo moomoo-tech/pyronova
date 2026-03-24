@@ -11,7 +11,7 @@ use pyo3::types::PyString;
 use crate::interp;
 use crate::response::{
     build_response, error_response, extract_response_data, not_found_response,
-    payload_too_large_response,
+    overloaded_response, payload_too_large_response,
 };
 use crate::router::SharedRoutes;
 use crate::static_fs::try_static_file;
@@ -231,7 +231,7 @@ pub(crate) async fn handle_request_subinterp(
         headers,
         response_tx,
     }) {
-        return Ok(error_response(&e));
+        return Ok(overloaded_response(&e));
     }
 
     let result = match response_rx.await {
