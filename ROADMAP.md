@@ -138,12 +138,45 @@ Benchmark: SubInterp 215k (channel pool, -0.5% vs mutex), GIL 104k (+3%), Robyn 
 - 如果 Step 2 的 fork 稳定，可以向 PyO3 上游提 PR
 - 关注 numpy/orjson/pydantic 等库的 `Py_MOD_PER_INTERPRETER_GIL_SUPPORTED` 适配进度
 
-## Phase 6 — 协议突破
-- [ ] Native WebSocket（交易系统核心需求）
+## Phase 6 — 协议突破 (进行中) — v0.4.0
+
+### WebSocket (DONE ✓) — 2026-03-24
+
+原生 WebSocket 支持，基于 `tokio-tungstenite`。
+
+**架构**：
+```
+Client ←WebSocket→ Tokio (async) ←channels→ Python handler thread (sync)
+                    ↑                         ↑
+            tokio-tungstenite          ws.recv() / ws.send()
+            async read/write           std::sync::mpsc (incoming)
+                                       tokio::sync::mpsc (outgoing)
+```
+
+- 每个 WebSocket 连接分配一个 OS 线程运行 Python handler
+- `SkyWebSocket` pyclass 提供 `recv()` (阻塞) / `send(msg)` / `close()` 接口
+- 自动处理 Ping/Pong、连接关闭
+- 与 HTTP 路由共存，同一端口同时服务 HTTP + WebSocket
+- GIL 模式和 Hybrid 模式均支持
+
+**API**：
+```python
+@app.websocket("/ws")
+def echo(ws):
+    while True:
+        msg = ws.recv()    # 阻塞等待
+        if msg is None:
+            break          # 客户端断开
+        ws.send(f"echo: {msg}")
+```
+
+### 待完成
 - [ ] HTTP/2（deps 里已有 hyper http2 feature）
 - [ ] io_uring backend (Linux, monoio)
 - [ ] HTTP/3 QUIC
 - [ ] Native gRPC (tonic crate, Robyn 不支持)
+- [ ] WebSocket 二进制消息支持
+- [ ] WebSocket 子解释器模式（当前走 GIL）
 
 ## 长期愿景
 - 成为第一个同时支持 free-threaded 和 per-interpreter GIL 的 Python web 框架
@@ -160,3 +193,4 @@ Benchmark: SubInterp 215k (channel pool, -0.5% vs mutex), GIL 104k (+3%), Robyn 
 | 2026-03-23 | v0.2.0 | 216k | 100k | 76k | Phase 2+4: 子解释器，2.8x Robyn |
 | 2026-03-24 | v0.3.0 | 213k | 100k | 76k | Phase 3: DX 功能补全，零回归 |
 | 2026-03-24 | v0.3.1 | 215k | 104k | 83k | Phase 5.1: RAII + channel pool + 模块化拆分 + 安全修复 |
+| 2026-03-24 | v0.4.0 | 215k | 104k | 83k | Phase 6: Native WebSocket + Hybrid GIL + 全面压测(54场景) |

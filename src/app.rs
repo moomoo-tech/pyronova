@@ -14,6 +14,7 @@ use tokio::signal;
 use crate::handlers::{handle_request, handle_request_subinterp};
 use crate::interp;
 use crate::router::{RouteTable, SharedRoutes};
+use crate::websocket;
 
 #[pyclass]
 pub(crate) struct SkyApp {
@@ -89,6 +90,12 @@ impl SkyApp {
         let mut routes = self.routes.write();
         routes.fallback_handler = Some(handler);
         routes.fallback_handler_name = Some(name);
+        Ok(())
+    }
+
+    fn websocket(&mut self, path: &str, handler: Py<PyAny>) -> PyResult<()> {
+        let mut routes = self.routes.write();
+        routes.ws_handlers.insert(path.to_string(), handler);
         Ok(())
     }
 
@@ -206,13 +213,20 @@ impl SkyApp {
                             tokio::spawn(async move {
                                 let svc = service_fn(move |req: Request<Incoming>| {
                                     let routes = Arc::clone(&routes);
-                                    async move { handle_request(req, routes).await }
+                                    async move {
+                                        if websocket::is_websocket_upgrade(&req) {
+                                            websocket::handle_websocket(req, routes).await
+                                        } else {
+                                            handle_request(req, routes).await
+                                        }
+                                    }
                                 });
 
                                 if let Err(e) = http1::Builder::new()
                                     .keep_alive(true)
                                     .pipeline_flush(true)
                                     .serve_connection(io, svc)
+                                    .with_upgrades()
                                     .await
                                 {
                                     let msg = e.to_string();
@@ -325,13 +339,20 @@ impl SkyApp {
                                 let svc = service_fn(move |req: Request<Incoming>| {
                                     let pool = Arc::clone(&pool);
                                     let routes = Arc::clone(&routes);
-                                    async move { handle_request_subinterp(req, pool, routes).await }
+                                    async move {
+                                        if websocket::is_websocket_upgrade(&req) {
+                                            websocket::handle_websocket(req, routes).await
+                                        } else {
+                                            handle_request_subinterp(req, pool, routes).await
+                                        }
+                                    }
                                 });
 
                                 if let Err(e) = http1::Builder::new()
                                     .keep_alive(true)
                                     .pipeline_flush(true)
                                     .serve_connection(io, svc)
+                                    .with_upgrades()
                                     .await
                                 {
                                     let msg = e.to_string();

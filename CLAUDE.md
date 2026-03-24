@@ -47,6 +47,7 @@ bash benchmarks/run_bench.sh
 - AST-based script filtering (`ast.parse` + `ast.unparse`) for sub-interpreter bootstrap
 - Static files served via Tokio async fs — no GIL needed
 - Middleware: before_request/after_request hooks stored in RouteTable alongside route handlers
+- WebSocket: tokio-tungstenite async ↔ Python sync via dual channels, one OS thread per connection
 
 ## Project Structure
 
@@ -61,6 +62,7 @@ src/
   json.rs             # py_to_json_value
   static_fs.rs        # try_static_file, mime_from_ext
   interp.rs           # PyObjRef RAII, channel worker pool, AST filter
+  websocket.rs        # SkyWebSocket, upgrade handler, async↔sync bridge
 python/skytrade/
   __init__.py         # Re-exports Pyre, SkyApp, SkyRequest, SkyResponse
   app.py              # Pyre class (decorator syntax, logging, static files)

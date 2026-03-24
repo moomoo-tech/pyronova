@@ -126,6 +126,34 @@ class Pyre:
         return decorator
 
     # ------------------------------------------------------------------
+    # WebSocket
+    # ------------------------------------------------------------------
+
+    def websocket(self, path: str, handler: Callable | None = None):
+        """Register a WebSocket handler. Use as decorator or direct call.
+
+        The handler receives a ``SkyWebSocket`` object with ``recv()``,
+        ``send(msg)``, and ``close()`` methods::
+
+            @app.websocket("/ws")
+            def ws_handler(ws):
+                while True:
+                    msg = ws.recv()
+                    if msg is None:
+                        break
+                    ws.send(f"echo: {msg}")
+        """
+        if handler is not None:
+            self._engine.websocket(path, handler)
+            return handler
+
+        def decorator(fn: Callable) -> Callable:
+            self._engine.websocket(path, fn)
+            return fn
+
+        return decorator
+
+    # ------------------------------------------------------------------
     # Static files
     # ------------------------------------------------------------------
 
