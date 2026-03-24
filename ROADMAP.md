@@ -181,13 +181,42 @@ def echo(ws):
 - [x] Type stubs (`engine.pyi`) → IDE 自动补全
 - [x] `call_handler_with_hooks()` 共享函数消除代码重复
 
+### SSE 流式传输 (DONE ✓) — 2026-03-24
+
+AI Agent 核心基础设施：token-by-token 流式输出。
+
+```python
+@app.get("/stream", gil=True)
+def stream(req):
+    s = SkyStream()
+    def generate():
+        for token in llm.generate(prompt):
+            s.send_event(token)
+        s.close()
+    threading.Thread(target=generate).start()
+    return s
+```
+
+**架构：**
+```
+Python handler thread → SkyStream.send_event()
+                       → mpsc::UnboundedSender
+                       → Tokio StreamBody (chunked transfer)
+                       → HTTP client (EventSource)
+```
+
+- `SkyStream` pyclass: `send(data)` / `send_event(data, event, id)` / `close()`
+- 通道在 `__init__` 时创建，`send()` 立即可用（无需等待 connect）
+- `BoxBody` 统一响应类型（`Either<Full, StreamBody>`）
+- SSE 格式：`event: xxx\ndata: xxx\n\n`
+
 ### 待完成
 - [ ] HTTP/2（deps 里已有 hyper http2 feature）
 - [ ] io_uring backend (Linux, monoio)
 - [ ] HTTP/3 QUIC
 - [ ] Native gRPC (tonic crate, Robyn 不支持)
+- [ ] MCP Server 装饰器（`@app.mcp.tool()`）
 - [ ] WebSocket 二进制消息支持
-- [ ] WebSocket 子解释器模式（当前走 GIL）
 - [ ] AST 过滤替换为环境变量方案
 - [ ] Pydantic 自动绑定
 
@@ -339,3 +368,4 @@ def hit_counter(req):
 | 2026-03-24 | v0.4.0 | 215k | 104k | 83k | Phase 6: Native WebSocket + Hybrid GIL + 全面压测(54场景) |
 | 2026-03-24 | v0.4.0+ | 217k | 78k(47k IO) | 81k | spawn_blocking + 背压 + TCP_NODELAY, GIL IO +535%, 胜10/14场景 |
 | 2026-03-24 | v0.5.0 | — | 74k state | — | Phase 7 async + Phase 8 SharedState + DX (.pyi, async detect) |
+| 2026-03-24 | v0.5.0+ | — | — | — | Phase 6: SSE streaming (SkyStream) for AI Agent token output |
