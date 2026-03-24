@@ -557,6 +557,11 @@ sys.modules["skytrade.mcp"] = types.ModuleType("skytrade.mcp")
         let builtins = ffi::PyEval_GetBuiltins(); // borrowed ref
         ffi::PyDict_SetItemString(globals.as_ptr(), c"__builtins__".as_ptr(), builtins);
 
+        // Set __file__ so user scripts can use it for path resolution
+        if let Some(py_file) = py_str(script_path) {
+            ffi::PyDict_SetItemString(globals.as_ptr(), c"__file__".as_ptr(), py_file.as_ptr());
+        }
+
         let code_cstr = std::ffi::CString::new(bootstrap.as_bytes())
             .map_err(|e| format!("CString error: {e}"))?;
         let _filename_cstr = std::ffi::CString::new(script_path)
