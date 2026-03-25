@@ -6,6 +6,27 @@ This guide maps out the **Golden Path**: libraries that are verified safe for su
 
 > **Philosophy**: Pyre doesn't force you to change, but it rewards you when you do.
 
+## Not Just Safe — Faster
+
+Switching to sub-interpreter safe libraries isn't a compromise. It's an upgrade. Benchmark results (Apple M4 Pro, 10 cores, wrk -t4 -c100 -d10s):
+
+| Test | FastAPI + Pydantic | Pyre + Golden Path | Speedup |
+|------|-------------------|-------------------|---------|
+| Health Check (plain JSON) | 9,031 req/s | **214,714 req/s** | **23.8x** |
+| JSON Echo (parse + serialize) | 7,602 req/s | **209,012 req/s** | **27.5x** |
+| CPU-bound (10k moving avg) | 263 req/s | **599 req/s** | **2.3x** |
+| Validation (field checking) | 7,345 req/s | **208,439 req/s** | **28.4x** |
+
+| Metric | FastAPI + Pydantic | Pyre + Golden Path |
+|--------|-------------------|-------------------|
+| Avg latency (Health) | 11.10 ms | **0.38 ms** (29x lower) |
+| Avg latency (Echo) | 13.17 ms | **0.40 ms** (33x lower) |
+| Avg latency (Validate) | 13.75 ms | **0.41 ms** (34x lower) |
+
+The traditional stack (FastAPI + Pydantic) is single-threaded — the GIL serializes all requests. Pyre with sub-interp safe libs runs 10 interpreters in parallel, each at full CPU speed. The result: **24-28x throughput** and **29-34x lower latency** for typical API workloads.
+
+Run the benchmark yourself: `bash benchmarks/run_comparison.sh`
+
 ## Quick Reference
 
 | Category | Traditional (GIL-bound) | Golden Path (Sub-interp Safe) | Why it matters |
