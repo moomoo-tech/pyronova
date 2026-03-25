@@ -107,14 +107,14 @@ Benchmarked on Apple Silicon (M-series), Python 3.14, wrk -t4 -c256 -d10s.
 |------------|------|-------|
 | **Architecture** | 1 process, 10 sub-interpreters | 22 OS processes |
 | **SharedState** (cross-worker) | Built-in (DashMap, nanosecond) | Not supported (needs Redis) |
-| **MCP Server** (AI tool protocol) | Built-in | Not supported |
+| **MCP Server** (AI tool protocol) | Built-in | Supported (experimental) |
 | **MsgPack RPC** | Built-in + magic client | Not supported |
-| **SSE Streaming** | Built-in (SkyStream) | Not supported |
+| **SSE Streaming** | Built-in (SkyStream) | Supported |
 | **GIL Watchdog** | Built-in (contention + hold time) | Not supported |
 | **Backpressure** (503 overload) | Built-in (bounded channels) | Not supported |
 | **Request Timeout** (504) | Built-in (30s zombie reaper) | Not supported |
 | **Hybrid Dispatch** (`gil=True`) | Auto-routes to main interpreter | Not supported |
-| **TestClient** | Built-in | Not supported |
+| **TestClient** | Built-in | Not built-in |
 | **WebSocket** | Supported | Supported |
 | **CORS** | Supported | Supported |
 | **Static Files** | Supported (async, no GIL) | Supported |
@@ -158,7 +158,7 @@ Benchmarked on Apple Silicon (M-series), Python 3.14, wrk -t4 -c256 -d10s.
 | Path params `/hello/{name}` | ✅ | ✅ | ✅ |
 | Query params | ✅ | ✅ | ✅ |
 | JSON parsing | ✅ | ✅ | ✅ |
-| Pydantic validation | ✅ `model=` | ✅ native | ❌ |
+| Pydantic validation | ✅ `model=` | ✅ native | ✅ |
 | File upload (multipart) | ✅ | ✅ | ✅ |
 | Cookie read/write | ✅ | ✅ | ✅ |
 | Redirect | ✅ | ✅ | ✅ |
@@ -170,9 +170,9 @@ Benchmarked on Apple Silicon (M-series), Python 3.14, wrk -t4 -c256 -d10s.
 | Feature | Pyre | FastAPI | Robyn |
 |---------|------|---------|-------|
 | HTTP/1.1 | ✅ | ✅ | ✅ |
-| HTTP/2 | ✅ | ✅ (uvicorn) | ✅ |
+| HTTP/2 | ✅ | ✅ (Hypercorn) | ✅ |
 | WebSocket (text+binary) | ✅ | ✅ | ✅ |
-| SSE streaming | ✅ | ✅ | ❌ |
+| SSE streaming | ✅ | ✅ | ✅ |
 
 ### Middleware & Security
 
@@ -180,7 +180,7 @@ Benchmarked on Apple Silicon (M-series), Python 3.14, wrk -t4 -c256 -d10s.
 |---------|------|---------|-------|
 | before/after hooks | ✅ | ✅ middleware | ✅ |
 | CORS | ✅ built-in | ✅ | ✅ |
-| Body size limit | ✅ 10MB | ✅ | ❌ |
+| Body size limit | ✅ 10MB | ✅ | ✅ |
 | Backpressure (503) | ✅ | ❌ | ❌ |
 | Path traversal protection | ✅ | ✅ | ❌ |
 | Worker panic protection | ✅ catch_unwind | N/A | N/A |
@@ -189,7 +189,7 @@ Benchmarked on Apple Silicon (M-series), Python 3.14, wrk -t4 -c256 -d10s.
 
 | Feature | Pyre | FastAPI | Robyn |
 |---------|------|---------|-------|
-| MCP Server (AI tools) | ✅ native | ❌ | ✅ |
+| MCP Server (AI tools) | ✅ native | ❌ (third-party) | ✅ |
 | MsgPack RPC | ✅ | ❌ | ❌ |
 | Content negotiation | ✅ JSON/MsgPack | JSON only | JSON only |
 | Magic RPC Client | ✅ | ❌ | ❌ |
@@ -217,12 +217,12 @@ Benchmarked on Apple Silicon (M-series), Python 3.14, wrk -t4 -c256 -d10s.
 
 | Feature | Pyre | FastAPI | Robyn | Notes |
 |---------|------|---------|-------|-------|
-| Type stubs (.pyi) | ✅ | ✅ native | ❌ | |
-| TestClient | ✅ | ✅ | ✅ | |
+| Type stubs (.pyi) | ✅ | ✅ native | ✅ | |
+| TestClient | ✅ | ✅ | ❌ | |
 | Env var config | ✅ | ✅ | ✅ | |
 | Hot reload | ✅ `reload=True` | ✅ `--reload` | ✅ | |
-| OpenAPI docs | — | ✅ | ❌ | Pyre uses MCP for AI discovery; type hints serve as docs |
-| Dependency injection | — | ✅ `Depends()` | ❌ | Pyre uses `before_request` hooks for the same purpose |
+| OpenAPI docs | — | ✅ | ✅ | Pyre uses MCP for AI discovery; type hints serve as docs |
+| Dependency injection | — | ✅ `Depends()` | ✅ | Pyre uses `before_request` hooks for the same purpose |
 
 ### C Extension Compatibility
 
