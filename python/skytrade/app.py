@@ -423,6 +423,9 @@ class Pyre:
         if _is_worker():
             return
 
+        import signal
+        # Suppress Python's noisy KeyboardInterrupt during threading shutdown
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
         self._engine.run(host=host, port=port, workers=workers, mode=mode)
 
     def _run_with_reload(self):
