@@ -1099,12 +1099,15 @@ sys.modules["skytrade.mcp"] = types.ModuleType("skytrade.mcp")
 // ---------------------------------------------------------------------------
 
 pub(crate) struct InterpreterPool {
-    work_tx: crossbeam_channel::Sender<WorkRequest>,
+    sync_work_tx: crossbeam_channel::Sender<WorkRequest>,
+    async_work_tx: Option<crossbeam_channel::Sender<WorkRequest>>,
     _worker_threads: Vec<std::thread::JoinHandle<()>>,
     routers: HashMap<String, Router<usize>>,
     handler_names: Vec<String>,
     pub(crate) requires_gil: Vec<bool>,
+    pub(crate) is_async_handler: Vec<bool>,
     pub(crate) static_dirs: Vec<(String, String)>,
+    has_async_workers: bool,
 }
 
 unsafe impl Send for InterpreterPool {}
@@ -1124,8 +1127,9 @@ impl InterpreterPool {
         after_hook_names: &[String],
         static_dirs: Vec<(String, String)>,
         requires_gil: Vec<bool>,
-        async_mode: bool,
+        is_async_handler: Vec<bool>,
     ) -> Result<Self, String> {
+        let has_any_async = is_async_handler.iter().any(|&a| a);
         // Set PYRE_WORKER=1 so user's app.run() becomes a no-op in sub-interpreters.
         // This replaces the fragile AST-based script filtering.
         std::env::set_var("PYRE_WORKER", "1");
@@ -1141,11 +1145,26 @@ impl InterpreterPool {
         all_func_names.sort();
         all_func_names.dedup();
 
-        // Create the shared work channel (multi-producer, multi-consumer)
-        // Bounded channel: backpressure prevents OOM under load spikes
-        let (work_tx, work_rx) = crossbeam_channel::bounded::<WorkRequest>(n * 128);
+        // Create work channels
+        // Sync pool: handles def handlers (220k req/s)
+        // Async pool: handles async def handlers (133k req/s)
+        let (sync_work_tx, sync_work_rx) = crossbeam_channel::bounded::<WorkRequest>(n * 128);
+        let (async_work_tx, async_work_rx) = if has_any_async {
+            let (tx, rx) = crossbeam_channel::bounded::<WorkRequest>(n * 128);
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
 
-        // Create N sub-interpreters and spawn worker threads
+        // Determine worker split: if async handlers exist, split workers
+        let (sync_count, async_count) = if has_any_async {
+            let async_n = (n / 2).max(2); // At least 2 async workers
+            (n - async_n, async_n)
+        } else {
+            (n, 0)
+        };
+
+        // Create sub-interpreters and spawn worker threads
         let mut workers = Vec::new();
         let mut threads = Vec::new();
 
@@ -1159,30 +1178,28 @@ impl InterpreterPool {
             workers.push(worker);
         }
 
-        if async_mode {
-            // Async mode: initialize global worker states for C-FFI bridge
+        // Initialize async worker states if needed
+        if has_any_async {
+            let async_rx = async_work_rx.as_ref().unwrap();
             let mut states = Vec::with_capacity(n);
             for _ in 0..n {
                 states.push(Arc::new(WorkerState {
-                    rx: work_rx.clone(),
+                    rx: async_rx.clone(),
                     response_map: Mutex::new(HashMap::new()),
                     next_req_id: AtomicU64::new(0),
                 }));
             }
-            // Each worker gets its own dedicated receiver
-            // Actually they share the same work_rx (multi-consumer)
-            // but each has its own response_map
             let _ = WORKER_STATES.set(states);
         }
 
-        // Spawn OS threads — each owns a SubInterpreterWorker
+        // Spawn workers: first sync_count as sync, rest as async
         for (i, worker) in workers.into_iter().enumerate() {
-            let rx = work_rx.clone();
             let handler_names_clone = handler_names.to_vec();
             let before_hooks_clone = before_hook_names.to_vec();
             let after_hooks_clone = after_hook_names.to_vec();
 
-            let handle = if async_mode {
+            let handle = if i >= sync_count && has_any_async {
+                // Async worker
                 std::thread::Builder::new()
                     .name(format!("pyre-async-worker-{i}"))
                     .spawn(move || {
@@ -1192,6 +1209,8 @@ impl InterpreterPool {
                     })
                     .map_err(|e| format!("failed to spawn async worker {i}: {e}"))?
             } else {
+                // Sync worker
+                let rx = sync_work_rx.clone();
                 std::thread::Builder::new()
                     .name(format!("pyre-worker-{i}"))
                     .spawn(move || {
@@ -1207,12 +1226,15 @@ impl InterpreterPool {
         }
 
         Ok(InterpreterPool {
-            work_tx,
+            sync_work_tx,
+            async_work_tx,
             _worker_threads: threads,
             routers,
             handler_names: handler_names.to_vec(),
             requires_gil,
+            is_async_handler: is_async_handler.clone(),
             static_dirs,
+            has_async_workers: has_any_async,
         })
     }
 
@@ -1233,22 +1255,24 @@ impl InterpreterPool {
         &self.handler_names[idx]
     }
 
-    /// Submit a work request. Uses try_send for backpressure — returns error
-    /// if queue is full (caller should return 503).
+    /// Submit a work request. Routes to sync or async pool based on handler type.
     pub fn submit(
         &self,
         req: WorkRequest,
     ) -> Result<(), String> {
-        self.work_tx
-            .try_send(req)
-            .map_err(|e| match e {
-                crossbeam_channel::TrySendError::Full(_) => {
-                    "server overloaded".to_string()
-                }
-                crossbeam_channel::TrySendError::Disconnected(_) => {
-                    "worker pool channel closed".to_string()
-                }
-            })
+        // Route to async pool if handler is async and pool exists
+        let tx = if self.has_async_workers
+            && self.is_async_handler.get(req.handler_idx).copied().unwrap_or(false)
+        {
+            self.async_work_tx.as_ref().unwrap()
+        } else {
+            &self.sync_work_tx
+        };
+
+        tx.try_send(req).map_err(|e| match e {
+            crossbeam_channel::TrySendError::Full(_) => "server overloaded".to_string(),
+            crossbeam_channel::TrySendError::Disconnected(_) => "worker pool channel closed".to_string(),
+        })
     }
 }
 

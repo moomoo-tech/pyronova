@@ -44,25 +44,25 @@ impl SkyApp {
     #[pyo3(signature = (path, handler, gil=false))]
     fn get(&mut self, path: &str, handler: Py<PyAny>, gil: bool, py: Python<'_>) -> PyResult<()> {
         let name = handler.getattr(py, "__name__")?.extract::<String>(py)?;
-        self.add_route("GET", path, handler, name, gil)
+        self.add_route("GET", path, handler, name, gil, py)
     }
 
     #[pyo3(signature = (path, handler, gil=false))]
     fn post(&mut self, path: &str, handler: Py<PyAny>, gil: bool, py: Python<'_>) -> PyResult<()> {
         let name = handler.getattr(py, "__name__")?.extract::<String>(py)?;
-        self.add_route("POST", path, handler, name, gil)
+        self.add_route("POST", path, handler, name, gil, py)
     }
 
     #[pyo3(signature = (path, handler, gil=false))]
     fn put(&mut self, path: &str, handler: Py<PyAny>, gil: bool, py: Python<'_>) -> PyResult<()> {
         let name = handler.getattr(py, "__name__")?.extract::<String>(py)?;
-        self.add_route("PUT", path, handler, name, gil)
+        self.add_route("PUT", path, handler, name, gil, py)
     }
 
     #[pyo3(signature = (path, handler, gil=false))]
     fn delete(&mut self, path: &str, handler: Py<PyAny>, gil: bool, py: Python<'_>) -> PyResult<()> {
         let name = handler.getattr(py, "__name__")?.extract::<String>(py)?;
-        self.add_route("DELETE", path, handler, name, gil)
+        self.add_route("DELETE", path, handler, name, gil, py)
     }
 
     #[pyo3(signature = (method, path, handler, gil=false))]
@@ -75,7 +75,7 @@ impl SkyApp {
         py: Python<'_>,
     ) -> PyResult<()> {
         let name = handler.getattr(py, "__name__")?.extract::<String>(py)?;
-        self.add_route(method, path, handler, name, gil)
+        self.add_route(method, path, handler, name, gil, py)
     }
 
     fn before_request(&mut self, handler: Py<PyAny>, py: Python<'_>) -> PyResult<()> {
@@ -170,6 +170,7 @@ impl SkyApp {
                 handlers: table.handlers.iter().map(|h| h.clone_ref(py)).collect(),
                 handler_names: table.handler_names.clone(),
                 requires_gil: table.requires_gil.clone(),
+                is_async: table.is_async.clone(),
                 routers: table.routers.clone(),
                 ws_handlers: table.ws_handlers.iter().map(|(k, v)| (k.clone(), v.clone_ref(py))).collect(),
                 before_hooks: table.before_hooks.iter().map(|h| h.clone_ref(py)).collect(),
@@ -182,8 +183,8 @@ impl SkyApp {
             })
         };
 
-        if mode == "subinterp" || mode == "async" {
-            self.run_subinterp(py, addr, workers, num_cpus, frozen, mode == "async")
+        if mode == "subinterp" || mode == "auto" {
+            self.run_subinterp(py, addr, workers, num_cpus, frozen)
         } else {
             self.run_gil(py, addr, workers, num_cpus, frozen)
         }
@@ -198,10 +199,17 @@ impl SkyApp {
         handler: Py<PyAny>,
         handler_name: String,
         gil: bool,
+        py: Python<'_>,
     ) -> PyResult<()> {
+        // Auto-detect if handler is async def
+        let inspect = py.import("inspect")?;
+        let is_async = inspect
+            .call_method1("iscoroutinefunction", (&handler,))?
+            .extract::<bool>()?;
+
         let mut routes = self.routes.write();
         routes
-            .insert(method, path, handler, handler_name, gil)
+            .insert(method, path, handler, handler_name, gil, is_async)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("route error: {e}")))?;
         Ok(())
     }
@@ -293,7 +301,6 @@ impl SkyApp {
         workers: usize,
         num_cpus: usize,
         routes: FrozenRoutes,
-        async_mode: bool,
     ) -> PyResult<()> {
         let script_path = if let Some(ref p) = self.script_path {
             p.clone()
@@ -314,11 +321,18 @@ impl SkyApp {
         let gil_count = requires_gil.iter().filter(|&&g| g).count();
         let subinterp_count = requires_gil.len() - gil_count;
 
-        let mode_label = if async_mode { "async" } else { "hybrid" };
+        let async_count_routes = routes.is_async.iter().filter(|&&a| a).count();
+        let has_async = async_count_routes > 0;
+        let mode_label = if has_async { "hybrid-async" } else { "hybrid" };
         println!("\n  Pyre v1.0.0 [{mode_label} mode]");
         println!("  Listening on http://{addr}");
         println!("  Sub-interpreters: {workers} (CPUs: {num_cpus})");
-        println!("  Routes: {subinterp_count} sub-interp + {gil_count} GIL");
+        if has_async {
+            let sync_w = workers - (workers / 2).max(2);
+            let async_w = (workers / 2).max(2);
+            println!("  Workers: {sync_w} sync + {async_w} async");
+        }
+        println!("  Routes: {subinterp_count} sub-interp + {gil_count} GIL + {async_count_routes} async");
         println!("  Script: {script_path}\n");
 
         let pool = unsafe {
@@ -332,7 +346,7 @@ impl SkyApp {
                 &after_hook_names,
                 static_dirs,
                 requires_gil,
-                async_mode,
+                routes.is_async.clone(),
             )
             .map_err(|e| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!(

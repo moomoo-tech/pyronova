@@ -9,6 +9,7 @@ pub(crate) struct RouteTable {
     pub(crate) handlers: Vec<Py<PyAny>>,
     pub(crate) handler_names: Vec<String>,
     pub(crate) requires_gil: Vec<bool>,
+    pub(crate) is_async: Vec<bool>,
     pub(crate) routers: HashMap<String, Router<usize>>,
     pub(crate) ws_handlers: HashMap<String, Py<PyAny>>,
     pub(crate) before_hooks: Vec<Py<PyAny>>,
@@ -26,6 +27,7 @@ impl RouteTable {
             handlers: Vec::new(),
             handler_names: Vec::new(),
             requires_gil: Vec::new(),
+            is_async: Vec::new(),
             routers: HashMap::new(),
             ws_handlers: HashMap::new(),
             before_hooks: Vec::new(),
@@ -45,11 +47,13 @@ impl RouteTable {
         handler: Py<PyAny>,
         handler_name: String,
         gil: bool,
+        is_async: bool,
     ) -> Result<(), String> {
         let idx = self.handlers.len();
         self.handlers.push(handler);
         self.handler_names.push(handler_name);
         self.requires_gil.push(gil);
+        self.is_async.push(is_async);
         let router = self
             .routers
             .entry(method.to_uppercase())
