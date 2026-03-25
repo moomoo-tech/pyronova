@@ -31,24 +31,23 @@ class Pyre:
 
         app.run()
 
-    Modes (choose based on your workload)::
+    Auto-detects ``def`` vs ``async def`` and routes to the right pool::
 
-        # Default: max throughput for sync handlers (220k req/s)
-        app.run()
+        @app.get("/fast")
+        def fast(req):              # → sync pool (220k req/s)
+            return "hello"
 
-        # I/O heavy: async handlers with await (133k req/s)
-        app.run(mode="async")
+        @app.get("/io")
+        async def io(req):          # → async pool (133k req/s)
+            await asyncio.sleep(0.1)
+            return "done"
 
-        # Numpy/C extensions: mark specific routes with gil=True
-        @app.get("/compute", gil=True)
-        def compute(req):
+        @app.get("/numpy", gil=True)
+        def compute(req):           # → GIL main interpreter
             import numpy as np
             return {"mean": float(np.mean([1,2,3]))}
 
-    Quick guide:
-        - All ``def`` handlers → default (fastest)
-        - Any ``async def`` with ``await`` → ``mode="async"``
-        - Need ``import numpy`` → add ``gil=True`` to that route
+        app.run()                   # zero config, auto dual-pool
     """
 
     def __init__(self) -> None:

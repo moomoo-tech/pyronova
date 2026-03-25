@@ -2,51 +2,61 @@
 
 ## 模式选择
 
-```
-Quick guide:
-  All def handlers      → app.run()              最快, 220k req/s
-  Any async def + await → app.run(mode="async")   I/O密集, 133k req/s
-  Need numpy/C扩展      → @app.get(gil=True)      Hybrid 混合调度
-```
+### 自动分流（推荐，默认行为）
 
-### 详细决策矩阵
-
-| 你的场景 | 推荐模式 | 为什么 |
-|---------|---------|--------|
-| REST API / JSON 路由 | `app.run()` | 默认 subinterp，极致吞吐 |
-| 数据库查询 (asyncpg) | `mode="async"` | await 不阻塞 worker |
-| 调用外部 API (httpx) | `mode="async"` | 并发 I/O |
-| asyncio.sleep / 定时器 | `mode="async"` | 协程挂起不占线程 |
-| numpy / pandas 计算 | `gil=True` 路由 | C 扩展需要主解释器 |
-| 混合：部分 numpy + 部分 API | Hybrid | 快路由走 subinterp，numpy 走 GIL |
-| AI Agent (LLM 调用) | `mode="async"` | await LLM 响应 |
-| SSE 流式输出 | `gil=True` + SkyStream | 长连接流式传输 |
-
-### 混用 sync + async handler
-
-`mode="async"` 同时支持 `def` 和 `async def`：
+**不需要手动选模式。** 框架自动检测 `def` 和 `async def`，创建双池分流：
 
 ```python
 @app.get("/fast")
-def fast(req):              # sync — 直接执行
+def fast(req):              # → sync pool (220k req/s)
     return "hello"
 
 @app.get("/io")
-async def io_heavy(req):    # async — await 不阻塞
+async def io_heavy(req):    # → async pool (133k req/s)
     await asyncio.sleep(0.1)
     return "done"
 
-app.run(mode="async")       # 两种都能跑
+@app.get("/numpy", gil=True)
+def compute(req):           # → GIL 主解释器 (numpy 支持)
+    import numpy as np
+    return {"mean": float(np.mean([1,2,3]))}
+
+app.run()                   # 自动检测，自动分流，零配置
 ```
 
-注意：sync handler 在 async 模式下有 ~35% 吞吐量开销（asyncio 引擎中转）。
-如果全是 sync handler，用默认模式（`app.run()`）更快。
+启动时框架会显示分配情况：
+```
+  Pyre v1.0.0 [hybrid-async mode]
+  Workers: 5 sync + 5 async
+  Routes: 2 sub-interp + 0 GIL + 1 async
+```
 
-### 不需要选择的情况
+### 三种路由类型
 
-- 如果所有 handler 都是普通 `def` 且没有 I/O 等待 → 直接 `app.run()`，不传任何参数
-- 如果混用 sync + async → `app.run(mode="async")`
-- 框架默认使用 `subinterp` 模式，这是最快的
+| 写法 | 路由到 | 性能 | 适用场景 |
+|------|--------|------|---------|
+| `def handler(req)` | sync worker pool | **220k req/s** | API、JSON、计算 |
+| `async def handler(req)` | async worker pool | **133k req/s** | 数据库、网络 I/O、await |
+| `@app.get(gil=True)` | 主解释器 (GIL) | **50-80k req/s** | numpy、C 扩展 |
+
+### 决策指南
+
+| 你的场景 | 怎么写 |
+|---------|--------|
+| REST API / JSON 路由 | `def handler(req)` |
+| 数据库查询 (asyncpg) | `async def handler(req)` + `await` |
+| 调用外部 API (httpx) | `async def handler(req)` + `await` |
+| numpy / pandas 计算 | `def handler(req)` + `gil=True` |
+| AI Agent (LLM 调用) | `async def handler(req)` + `await` |
+| SSE 流式输出 | `def handler(req)` + `gil=True` + `SkyStream` |
+| 混合场景 | 直接混写，框架自动分流 |
+
+### 性能保证
+
+- `def` handler 始终走 sync pool → **220k req/s，零损失**
+- `async def` handler 走 async pool → **133k req/s，真并发 I/O**
+- 两种 handler 混在一起不会互相影响（独立通道 + 独立 worker）
+- `gil=True` 路由走 `spawn_blocking`，不阻塞任何 pool
 
 ### 子解释器内存效率
 
