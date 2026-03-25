@@ -54,30 +54,83 @@ Pyre:
 
 ## Feature Comparison
 
+### Routing & Request/Response
+
 | Feature | Pyre | FastAPI | Robyn |
 |---------|------|---------|-------|
 | Decorator routing | ✅ | ✅ | ✅ |
-| Path/query params | ✅ | ✅ | ✅ |
+| Path params `/hello/{name}` | ✅ | ✅ | ✅ |
+| Query params | ✅ | ✅ | ✅ |
+| JSON parsing | ✅ | ✅ | ✅ |
 | Pydantic validation | ✅ `model=` | ✅ native | ❌ |
-| File upload | ✅ | ✅ | ✅ |
-| Cookie | ✅ | ✅ | ✅ |
+| File upload (multipart) | ✅ | ✅ | ✅ |
+| Cookie read/write | ✅ | ✅ | ✅ |
 | Redirect | ✅ | ✅ | ✅ |
-| CORS | ✅ built-in | ✅ | ✅ |
-| HTTP/2 | ✅ | ✅ | ✅ |
+| Custom status/headers | ✅ | ✅ | ✅ |
+| Static files | ✅ | ✅ | ✅ |
+
+### Protocols
+
+| Feature | Pyre | FastAPI | Robyn |
+|---------|------|---------|-------|
+| HTTP/1.1 | ✅ | ✅ | ✅ |
+| HTTP/2 | ✅ | ✅ (uvicorn) | ✅ |
 | WebSocket (text+binary) | ✅ | ✅ | ✅ |
 | SSE streaming | ✅ | ✅ | ❌ |
-| MCP Server (AI) | ✅ native | ❌ | ✅ |
-| MsgPack RPC | ✅ | ❌ | ❌ |
-| SharedState (no Redis) | ✅ | ❌ | ❌ |
-| Sub-interpreter parallelism | ✅ | ❌ | ❌ |
-| Hybrid GIL dispatch | ✅ | ❌ | ❌ |
-| Auto sync/async dual pool | ✅ | ❌ | ❌ |
-| GIL Watchdog monitoring | ✅ | ❌ | ❌ |
+
+### Middleware & Security
+
+| Feature | Pyre | FastAPI | Robyn |
+|---------|------|---------|-------|
+| before/after hooks | ✅ | ✅ middleware | ✅ |
+| CORS | ✅ built-in | ✅ | ✅ |
+| Body size limit | ✅ 10MB | ✅ | ❌ |
 | Backpressure (503) | ✅ | ❌ | ❌ |
-| TestClient | ✅ | ✅ | ✅ |
-| OpenAPI docs | ❌ | ✅ | ❌ |
-| Dependency injection | ❌ | ✅ | ❌ |
-| Hot reload | ❌ | ✅ | ✅ |
+| Path traversal protection | ✅ | ✅ | ❌ |
+| Worker panic protection | ✅ catch_unwind | N/A | N/A |
+
+### AI & Microservices
+
+| Feature | Pyre | FastAPI | Robyn |
+|---------|------|---------|-------|
+| MCP Server (AI tools) | ✅ native | ❌ | ✅ |
+| MsgPack RPC | ✅ | ❌ | ❌ |
+| Content negotiation | ✅ JSON/MsgPack | JSON only | JSON only |
+| Magic RPC Client | ✅ | ❌ | ❌ |
+| SharedState (no Redis) | ✅ nanosecond | ❌ needs Redis | ❌ needs Redis |
+
+### Concurrency (Pyre unique)
+
+| Feature | Pyre | FastAPI | Robyn |
+|---------|------|---------|-------|
+| Sub-interpreter parallelism | ✅ Per-GIL | ❌ | ❌ |
+| Hybrid GIL dispatch | ✅ | ❌ | ❌ |
+| Auto sync/async dual pool | ✅ zero-loss | ❌ | ❌ |
+| Multi-process | — (not needed) | ✅ Gunicorn | ✅ --fast |
+
+### Observability (Pyre unique)
+
+| Feature | Pyre | FastAPI | Robyn |
+|---------|------|---------|-------|
+| GIL Watchdog | ✅ | ❌ | ❌ |
+| Memory RSS monitoring | ✅ | ❌ | ❌ |
+| Request counters | ✅ | ❌ | ❌ |
+| Structured logging | ✅ | ✅ | ✅ |
+
+### Developer Experience
+
+| Feature | Pyre | FastAPI | Robyn | Notes |
+|---------|------|---------|-------|-------|
+| Type stubs (.pyi) | ✅ | ✅ native | ❌ | |
+| TestClient | ✅ | ✅ | ✅ | |
+| Env var config | ✅ | ✅ | ✅ | |
+| Hot reload | ✅ `reload=True` | ✅ `--reload` | ✅ | |
+| OpenAPI docs | — | ✅ | ❌ | Pyre uses MCP for AI discovery; type hints serve as docs |
+| Dependency injection | — | ✅ `Depends()` | ❌ | Pyre uses `before_request` hooks for the same purpose |
+
+> **Why no OpenAPI?** Pyre targets high-performance APIs and AI agents, not browser-based API explorers. For AI tool discovery, MCP is a more modern protocol. For human developers, Pydantic models + type stubs provide the same contract guarantees.
+>
+> **Why no dependency injection?** `before_request` hooks solve the same problem (auth, DB connections, shared logic) with less magic and better debuggability. DI adds framework coupling without performance benefit.
 
 ## Install
 
