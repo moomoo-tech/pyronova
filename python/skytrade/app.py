@@ -384,11 +384,18 @@ class Pyre:
         port: int | None = None,
         workers: int | None = None,
         mode: str | None = None,
+        reload: bool = False,
     ) -> None:
         # Priority: param > env var > default
         host = host or os.environ.get("PYRE_HOST", "127.0.0.1")
         port = port or int(os.environ.get("PYRE_PORT", "8000"))
         workers = workers or (int(os.environ.get("PYRE_WORKERS")) if os.environ.get("PYRE_WORKERS") else None)
+
+        # Hot reload: watch .py files, restart on change
+        reload = reload or os.environ.get("PYRE_RELOAD") == "1"
+        if reload and os.environ.get("_PYRE_RELOAD_CHILD") != "1":
+            self._run_with_reload()
+            return
 
         # Auto-enable logging if PYRE_LOG=1
         if os.environ.get("PYRE_LOG") == "1" and not hasattr(self, "_logging_enabled"):
@@ -419,3 +426,57 @@ class Pyre:
             return
 
         self._engine.run(host=host, port=port, workers=workers, mode=mode)
+
+    def _run_with_reload(self):
+        """Watch .py files and restart server on changes."""
+        import subprocess
+        import hashlib
+        import glob
+
+        script = sys.argv[0] if sys.argv else None
+        if not script:
+            print("  [reload] Cannot determine script path, running without reload")
+            return
+
+        watch_dir = os.path.dirname(os.path.abspath(script)) or "."
+        print(f"  [reload] Watching {watch_dir} for .py changes...")
+
+        def _file_hash(path):
+            try:
+                with open(path, "rb") as f:
+                    return hashlib.md5(f.read()).hexdigest()
+            except Exception:
+                return ""
+
+        def _snapshot():
+            files = {}
+            for f in glob.glob(os.path.join(watch_dir, "**/*.py"), recursive=True):
+                files[f] = _file_hash(f)
+            return files
+
+        while True:
+            env = {**os.environ, "_PYRE_RELOAD_CHILD": "1"}
+            proc = subprocess.Popen([sys.executable, script], env=env)
+            snap = _snapshot()
+
+            try:
+                while proc.poll() is None:
+                    time.sleep(1)
+                    current = _snapshot()
+                    if current != snap:
+                        changed = [f for f in current if current.get(f) != snap.get(f)]
+                        print(f"\n  [reload] File changed: {', '.join(os.path.basename(f) for f in changed[:3])}")
+                        print(f"  [reload] Restarting...\n")
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=3)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                        break
+                else:
+                    # Process exited on its own (crash or Ctrl+C)
+                    break
+            except KeyboardInterrupt:
+                proc.terminate()
+                proc.wait()
+                break
