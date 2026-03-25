@@ -33,6 +33,9 @@ jobs:
           source .venv/bin/activate
           pip install maturin pytest websockets httpx pydantic numpy msgpack
 
+      - name: cargo test (Rust compile check)
+        run: cargo test
+
       - name: Build (release)
         run: |
           source .venv/bin/activate
