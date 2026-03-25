@@ -21,7 +21,7 @@ class Pyre:
 
     Usage::
 
-        from skytrade import Pyre, SkyResponse
+        from skytrade import Pyre
 
         app = Pyre()
 
@@ -29,11 +29,26 @@ class Pyre:
         def index(req):
             return "Hello from Pyre!"
 
-        @app.get("/hello/{name}")
-        def greet(req):
-            return {"message": f"Hello, {req.params['name']}!"}
-
         app.run()
+
+    Modes (choose based on your workload)::
+
+        # Default: max throughput for sync handlers (220k req/s)
+        app.run()
+
+        # I/O heavy: async handlers with await (133k req/s)
+        app.run(mode="async")
+
+        # Numpy/C extensions: mark specific routes with gil=True
+        @app.get("/compute", gil=True)
+        def compute(req):
+            import numpy as np
+            return {"mean": float(np.mean([1,2,3]))}
+
+    Quick guide:
+        - All ``def`` handlers → default (fastest)
+        - Any ``async def`` with ``await`` → ``mode="async"``
+        - Need ``import numpy`` → add ``gil=True`` to that route
     """
 
     def __init__(self) -> None:
@@ -320,6 +335,10 @@ class Pyre:
 
             self._engine.route("POST", "/mcp", _mcp_handler, True)  # gil=True
             print(f"  MCP: {len(mcp._tools)} tools, {len(mcp._resources)} resources, {len(mcp._prompts)} prompts → POST /mcp")
+
+        # Auto-detect best mode if not explicitly set
+        if mode is None:
+            mode = "subinterp"
 
         # In worker mode (sub-interpreter), don't start the server —
         # just loading the script to register routes is enough.
