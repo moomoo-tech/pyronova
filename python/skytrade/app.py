@@ -291,6 +291,10 @@ class Pyre:
         self._engine.before_request(_log_before)
         self._engine.after_request(_log_after)
 
+        # Also enable Rust-level logging for sub-interpreter mode
+        from skytrade.engine import enable_request_logging
+        enable_request_logging(True)
+
     # ------------------------------------------------------------------
     # Run
     # ------------------------------------------------------------------

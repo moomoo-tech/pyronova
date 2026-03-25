@@ -22,5 +22,11 @@ fn engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<state::SharedState>()?;
     m.add_class::<stream::SkyStream>()?;
     m.add_function(pyo3::wrap_pyfunction!(monitor::get_gil_metrics, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(enable_request_logging, m)?)?;
     Ok(())
+}
+
+#[pyfunction]
+fn enable_request_logging(enabled: bool) {
+    interp::REQUEST_LOGGING.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }

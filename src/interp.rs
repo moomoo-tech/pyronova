@@ -16,6 +16,9 @@ use pyo3::prelude::*;
 // Phase 7.2: Global worker state for async C-FFI bridge
 // ---------------------------------------------------------------------------
 
+/// Enable request logging in sub-interpreter workers (set by Python enable_logging)
+pub(crate) static REQUEST_LOGGING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Per-worker state accessible from C-FFI functions (no closure environment).
 struct WorkerState {
     rx: crossbeam_channel::Receiver<WorkRequest>,
@@ -1286,6 +1289,17 @@ fn worker_thread_loop(
             Ok(r) => r,
             Err(_) => Err("internal error: worker panic".to_string()),
         };
+
+        // Log request if enabled
+        if REQUEST_LOGGING.load(std::sync::atomic::Ordering::Relaxed) {
+            let elapsed = std::time::Instant::now(); // approximation
+            let status = match &response {
+                Ok(r) => r.status,
+                Err(_) => 500,
+            };
+            let tag = if status >= 500 { "ERROR" } else if status >= 400 { "WARN " } else { "INFO " };
+            eprintln!("  [{tag}] {} {} → {status}", req.method, req.path);
+        }
 
         // Send response back (ignore error if receiver dropped)
         let _ = req.response_tx.send(response);
