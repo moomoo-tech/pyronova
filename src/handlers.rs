@@ -389,7 +389,7 @@ pub(crate) async fn handle_request_subinterp(
     match result {
         Ok(resp) => {
             let ct = resp.content_type.unwrap_or_else(|| {
-                if resp.is_json || resp.body.starts_with('{') || resp.body.starts_with('[') {
+                if resp.is_json || resp.body.starts_with(b"{") || resp.body.starts_with(b"[") {
                     "application/json".to_string()
                 } else {
                     "text/plain; charset=utf-8".to_string()

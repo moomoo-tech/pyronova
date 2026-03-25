@@ -70,7 +70,7 @@ unsafe extern "C" fn pyre_recv_cfunc(
             let req_id = state.next_req_id.fetch_add(1, Ordering::Relaxed);
             state.response_map.lock().unwrap().insert(req_id, req.response_tx);
 
-            let tuple = ffi::PyTuple_New(6);
+            let tuple = ffi::PyTuple_New(7);
             ffi::PyTuple_SetItem(tuple, 0, ffi::PyLong_FromUnsignedLongLong(req_id));
             ffi::PyTuple_SetItem(tuple, 1, ffi::PyLong_FromUnsignedLongLong(req.handler_idx as u64));
             ffi::PyTuple_SetItem(
@@ -88,6 +88,12 @@ unsafe extern "C" fn pyre_recv_cfunc(
             ffi::PyTuple_SetItem(
                 tuple, 5,
                 ffi::PyBytes_FromStringAndSize(req.body.as_ptr() as *const _, req.body.len() as isize),
+            );
+            // Serialize headers as JSON string for Python
+            let headers_json = serde_json::to_string(&req.headers).unwrap_or_else(|_| "{}".to_string());
+            ffi::PyTuple_SetItem(
+                tuple, 6,
+                ffi::PyUnicode_FromStringAndSize(headers_json.as_ptr() as *const _, headers_json.len() as isize),
             );
             tuple
         }
@@ -133,11 +139,11 @@ unsafe extern "C" fn pyre_send_cfunc(
         None
     };
 
-    let body = if !body_ptr.is_null() && body_len > 0 {
+    let body: Vec<u8> = if !body_ptr.is_null() && body_len > 0 {
         let slice = std::slice::from_raw_parts(body_ptr as *const u8, body_len as usize);
-        String::from_utf8_lossy(slice).into_owned()
+        slice.to_vec()
     } else {
-        String::new()
+        Vec::new()
     };
 
     if let Some(state) = get_worker_state(worker_id as usize) {
@@ -357,7 +363,7 @@ def _pyre_filter_script(source):
 
 /// Result from a sub-interpreter handler call.
 pub(crate) struct SubInterpResponse {
-    pub body: String,
+    pub body: Vec<u8>,
     pub status: u16,
     pub content_type: Option<String>,
     pub headers: HashMap<String, String>,
@@ -874,7 +880,7 @@ sys.modules["skytrade.uploads"] = _uploads_mod
         if ffi::PyDict_Check(ptr) != 0 {
             let json_str = self.json_dumps(result_obj)?;
             return Ok(SubInterpResponse {
-                body: json_str,
+                body: json_str.into_bytes(),
                 status: 200,
                 content_type: None,
                 headers: HashMap::new(),
@@ -886,7 +892,7 @@ sys.modules["skytrade.uploads"] = _uploads_mod
         if ffi::PyUnicode_Check(ptr) != 0 {
             let s = pyobj_to_string(ptr)?;
             return Ok(SubInterpResponse {
-                body: s,
+                body: s.into_bytes(),
                 status: 200,
                 content_type: None,
                 headers: HashMap::new(),
@@ -899,7 +905,7 @@ sys.modules["skytrade.uploads"] = _uploads_mod
             .ok_or("str() failed")?;
         let s = pyobj_to_string(str_obj.as_ptr())?;
         Ok(SubInterpResponse {
-            body: s,
+            body: s.into_bytes(),
             status: 200,
             content_type: None,
             headers: HashMap::new(),
@@ -913,7 +919,9 @@ sys.modules["skytrade.uploads"] = _uploads_mod
             return Err("_SkyResponse class not available".to_string());
         }
 
-        let py_body = py_str(&resp.body).ok_or("failed to create body str")?;
+        // Convert body Vec<u8> to Python str (for _SkyResponse)
+        let body_str = String::from_utf8_lossy(&resp.body);
+        let py_body = py_str(&body_str).ok_or("failed to create body str")?;
         let py_status = PyObjRef::from_owned(ffi::PyLong_FromLong(resp.status as i64))
             .ok_or("failed to create status")?;
         let py_ct = match &resp.content_type {
@@ -1065,8 +1073,8 @@ sys.modules["skytrade.uploads"] = _uploads_mod
             ffi::PyErr_Clear();
         }
 
-        // body
-        let (body, is_json) = {
+        // body (returns Vec<u8>)
+        let (body, is_json): (Vec<u8>, bool) = {
             let attr = PyObjRef::from_owned(
                 ffi::PyObject_GetAttrString(ptr, c"body".as_ptr()),
             );
@@ -1074,25 +1082,35 @@ sys.modules["skytrade.uploads"] = _uploads_mod
                 Some(a) => {
                     if ffi::PyDict_Check(a.as_ptr()) != 0 {
                         match self.json_dumps(a) {
-                            Ok(s) => (s, true),
-                            Err(_) => (String::new(), false),
+                            Ok(s) => (s.into_bytes(), true),
+                            Err(_) => (Vec::new(), false),
+                        }
+                    } else if ffi::PyBytes_Check(a.as_ptr()) != 0 {
+                        // Raw bytes — pass through without UTF-8 conversion
+                        let size = ffi::PyBytes_Size(a.as_ptr());
+                        let ptr = ffi::PyBytes_AsString(a.as_ptr());
+                        if !ptr.is_null() && size > 0 {
+                            let slice = std::slice::from_raw_parts(ptr as *const u8, size as usize);
+                            (slice.to_vec(), false)
+                        } else {
+                            (Vec::new(), false)
                         }
                     } else if ffi::PyUnicode_Check(a.as_ptr()) != 0 {
-                        (pyobj_to_string(a.as_ptr()).unwrap_or_default(), false)
+                        (pyobj_to_string(a.as_ptr()).unwrap_or_default().into_bytes(), false)
                     } else {
                         let str_obj = PyObjRef::from_owned(ffi::PyObject_Str(a.as_ptr()));
                         match str_obj {
-                            Some(s) => (pyobj_to_string(s.as_ptr()).unwrap_or_default(), false),
+                            Some(s) => (pyobj_to_string(s.as_ptr()).unwrap_or_default().into_bytes(), false),
                             None => {
                                 ffi::PyErr_Clear();
-                                (String::new(), false)
+                                (Vec::new(), false)
                             }
                         }
                     }
                 }
                 None => {
                     ffi::PyErr_Clear();
-                    (String::new(), false)
+                    (Vec::new(), false)
                 }
             }
         };
