@@ -199,13 +199,23 @@ Benchmarked on Apple Silicon (M-series), Python 3.14, wrk -t4 -c256 -d10s.
 
 Python C extensions (PyO3/Rust, C/C++) use global state that isn't compatible with sub-interpreters (PEP 684). This is a CPython ecosystem limitation, not a Pyre limitation.
 
-| Library | Sub-interp (`def`) | GIL route (`gil=True`) | Why |
-|---------|-------------------|----------------------|-----|
-| **pydantic** | ❌ | ✅ | pydantic-core is PyO3, global static |
-| **numpy** | ❌ | ✅ | Hardcoded "load once per process" check |
-| **orjson** | ❌ (strict mode) | ✅ | PyO3 module |
-| **Pure Python libs** | ✅ | ✅ | No global C state |
-| **json, hashlib, asyncio** | ✅ | ✅ | stdlib, no issues |
+| Library | Sub-interp | gil=True | Why |
+|---------|-----------|----------|-----|
+| **pydantic** | ❌ | ✅ | pydantic-core is PyO3/Rust, global static state |
+| **numpy** | ❌ | ✅ | C extension hardcodes "load once per process" |
+| **pandas** | ❌ | ✅ | Depends on numpy |
+| **scipy** | ❌ | ✅ | Depends on numpy |
+| **orjson** | ❌ | ✅ | PyO3/Rust module |
+| **sqlalchemy** | ❌ | ✅ | C extensions (greenlet, cython) |
+| **pillow** | ❌ | ✅ | C extension with global state |
+| **httpx** | ✅ | ✅ | Pure Python |
+| **requests** | ✅ | ✅ | Pure Python |
+| **json, hashlib, math** | ✅ | ✅ | stdlib, multi-interp safe |
+| **asyncio, threading** | ✅ | ✅ | stdlib, per-interpreter loops |
+| **dataclasses, typing** | ✅ | ✅ | Pure Python |
+| **re, datetime, os** | ✅ | ✅ | stdlib |
+
+**Rule of thumb:** if `pip show <package>` shows a `.so`/`.pyd` file, it likely needs `gil=True`. Pure Python packages always work in sub-interpreters.
 
 **The fix is simple: add `gil=True` to routes that need C extensions.**
 
