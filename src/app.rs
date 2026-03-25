@@ -22,6 +22,10 @@ pub(crate) struct SkyApp {
     routes: MutableRoutes,
     script_path: Option<String>,
     shared_state: Arc<dashmap::DashMap<String, Vec<u8>>>,
+    /// Per-instance CORS origin (None = disabled).
+    cors_origin: Option<String>,
+    /// Per-instance request logging flag.
+    request_logging: bool,
 }
 
 #[pymethods]
@@ -32,7 +36,19 @@ impl SkyApp {
             routes: Arc::new(parking_lot::RwLock::new(RouteTable::new())),
             script_path: None,
             shared_state: Arc::new(dashmap::DashMap::new()),
+            cors_origin: None,
+            request_logging: false,
         }
+    }
+
+    /// Set per-instance CORS origin.
+    fn set_cors_origin(&mut self, origin: String) {
+        self.cors_origin = Some(origin);
+    }
+
+    /// Enable/disable per-instance request logging.
+    fn enable_request_logging(&mut self, enabled: bool) {
+        self.request_logging = enabled;
     }
 
     /// Access the shared state (cross-sub-interpreter, nanosecond latency).
@@ -347,6 +363,8 @@ impl SkyApp {
                 static_dirs,
                 requires_gil,
                 routes.is_async.clone(),
+                self.cors_origin.clone(),
+                self.request_logging,
             )
             .map_err(|e| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!(

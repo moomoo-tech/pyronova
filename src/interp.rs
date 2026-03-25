@@ -16,11 +16,9 @@ use pyo3::prelude::*;
 // Phase 7.2: Global worker state for async C-FFI bridge
 // ---------------------------------------------------------------------------
 
-/// Enable request logging in sub-interpreter workers (set by Python enable_logging)
-pub(crate) static REQUEST_LOGGING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// CORS allow-origin header value (empty = disabled)
-pub(crate) static CORS_ORIGIN: OnceLock<String> = OnceLock::new();
+// Per-pool configuration (replaces former global statics).
+// These are set on SkyApp before run() and propagated to InterpreterPool.
+use std::sync::atomic::AtomicBool;
 
 /// Per-worker state accessible from C-FFI functions (no closure environment).
 struct WorkerState {
@@ -218,6 +216,13 @@ impl Drop for PyObjRef {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
             unsafe {
+                // SAFETY: Py_DECREF requires the GIL to be held.
+                // This assertion catches accidental drops from non-GIL threads
+                // (e.g. Tokio async tasks) during development.
+                debug_assert!(
+                    ffi::PyGILState_Check() == 1,
+                    "PyObjRef dropped without holding the GIL — this is a use-after-free bug"
+                );
                 ffi::Py_DECREF(self.ptr);
             }
         }
@@ -931,6 +936,10 @@ pub(crate) struct InterpreterPool {
     pub(crate) is_async_handler: Vec<bool>,
     pub(crate) static_dirs: Vec<(String, String)>,
     has_async_workers: bool,
+    /// Per-instance CORS origin (None = disabled).
+    pub(crate) cors_origin: Option<String>,
+    /// Per-instance request logging flag, shared with worker threads.
+    request_logging: Arc<AtomicBool>,
 }
 
 unsafe impl Send for InterpreterPool {}
@@ -951,6 +960,8 @@ impl InterpreterPool {
         static_dirs: Vec<(String, String)>,
         requires_gil: Vec<bool>,
         is_async_handler: Vec<bool>,
+        cors_origin: Option<String>,
+        request_logging: bool,
     ) -> Result<Self, String> {
         let has_any_async = is_async_handler.iter().any(|&a| a);
         // Set PYRE_WORKER=1 so user's app.run() becomes a no-op in sub-interpreters.
@@ -1015,11 +1026,14 @@ impl InterpreterPool {
             let _ = WORKER_STATES.set(states);
         }
 
+        let logging_flag = Arc::new(AtomicBool::new(request_logging));
+
         // Spawn workers: first sync_count as sync, rest as async
         for (i, worker) in workers.into_iter().enumerate() {
             let handler_names_clone = handler_names.to_vec();
             let before_hooks_clone = before_hook_names.to_vec();
             let after_hooks_clone = after_hook_names.to_vec();
+            let logging = Arc::clone(&logging_flag);
 
             let handle = if i >= sync_count && has_any_async {
                 // Async worker
@@ -1040,6 +1054,7 @@ impl InterpreterPool {
                         worker_thread_loop(
                             worker, rx, &handler_names_clone,
                             &before_hooks_clone, &after_hooks_clone,
+                            &logging,
                         );
                     })
                     .map_err(|e| format!("failed to spawn worker thread {i}: {e}"))?
@@ -1058,6 +1073,8 @@ impl InterpreterPool {
             is_async_handler: is_async_handler.clone(),
             static_dirs,
             has_async_workers: has_any_async,
+            cors_origin,
+            request_logging: logging_flag,
         })
     }
 
@@ -1106,6 +1123,7 @@ fn worker_thread_loop(
     handler_names: &[String],
     before_hook_names: &[String],
     after_hook_names: &[String],
+    request_logging: &AtomicBool,
 ) {
     while let Ok(req) = rx.recv() {
         // Catch panics to prevent worker thread death
@@ -1138,7 +1156,7 @@ fn worker_thread_loop(
         };
 
         // Log request if enabled
-        if REQUEST_LOGGING.load(std::sync::atomic::Ordering::Relaxed) {
+        if request_logging.load(Ordering::Relaxed) {
             let elapsed = std::time::Instant::now(); // approximation
             let status = match &response {
                 Ok(r) => r.status,

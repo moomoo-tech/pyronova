@@ -204,9 +204,8 @@ class Pyre:
         self._engine.before_request(_cors_before)
         self._engine.after_request(_cors_after)
 
-        # Also set Rust-level CORS for sub-interpreter mode
-        from skytrade.engine import set_cors_origin
-        set_cors_origin(allow_origins)
+        # Also set Rust-level CORS for sub-interpreter mode (per-instance)
+        self._engine.set_cors_origin(allow_origins)
 
     # ------------------------------------------------------------------
 
@@ -370,9 +369,8 @@ class Pyre:
         self._engine.before_request(_log_before)
         self._engine.after_request(_log_after)
 
-        # Also enable Rust-level logging for sub-interpreter mode
-        from skytrade.engine import enable_request_logging
-        enable_request_logging(True)
+        # Also enable Rust-level logging for sub-interpreter mode (per-instance)
+        self._engine.enable_request_logging(True)
 
     # ------------------------------------------------------------------
     # Run
