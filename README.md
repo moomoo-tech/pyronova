@@ -557,6 +557,35 @@ Pyre (Rust core, 12 modules)
 └── Backpressure (bounded channels, 503 on overload)
 ```
 
+## Sub-interpreter Safe Ecosystem
+
+Pyre's sub-interpreters deliver 220k req/s, but C extensions (Pydantic, NumPy, Pandas) can't run in them. Instead of fighting the ecosystem, Pyre offers a **Golden Path**: modern, pure-Python alternatives that are faster *and* sub-interpreter safe.
+
+| Category | Traditional (needs `gil=True`) | Golden Path (sub-interp safe) |
+|----------|-------------------------------|-------------------------------|
+| Validation | Pydantic V2 | `msgspec` / `mashumaro` |
+| Data | Pandas + NumPy | `Polars` |
+| HTTP Client | requests | `httpx` |
+| JSON | orjson | stdlib `json` / `msgspec` |
+| Database | psycopg2 | `psycopg` v3 (pure Python) |
+
+**The rule**: pure Python = sub-interp safe. C extensions = use `gil=True`.
+
+### Pyre vs FastAPI (head-to-head benchmark)
+
+Same endpoints, same logic — Pyre with sub-interp safe libs vs FastAPI with Pydantic:
+
+| Test | FastAPI | Pyre | Speedup |
+|------|---------|------|---------|
+| Health Check | 9,031 req/s | 214,714 req/s | **23.8x** |
+| JSON Echo | 7,602 req/s | 209,012 req/s | **27.5x** |
+| CPU-bound (10k moving avg) | 263 req/s | 599 req/s | **2.3x** |
+| Validation | 7,345 req/s | 208,439 req/s | **28.4x** |
+
+> *"Pyre doesn't force you to change, but it rewards you when you do."*
+
+Full ecosystem guide: [docs/subinterp-safe-ecosystem.md](docs/subinterp-safe-ecosystem.md)
+
 ## Limitations
 
 Pyre's sub-interpreter architecture delivers extreme performance but comes with specific constraints. All are caused by **CPython ecosystem limitations, not Pyre design choices**, and all have clear workarounds.

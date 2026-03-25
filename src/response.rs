@@ -181,6 +181,18 @@ pub(crate) fn payload_too_large_response() -> Response<Full<Bytes>> {
 }
 
 #[inline]
+pub(crate) fn gateway_timeout_response() -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(StatusCode::GATEWAY_TIMEOUT)
+        .header("content-type", "application/json")
+        .header("server", SERVER_HEADER)
+        .body(Full::new(Bytes::from_static(
+            b"{\"error\":\"request timeout\"}",
+        )))
+        .unwrap()
+}
+
+#[inline]
 pub(crate) fn not_found_response() -> Response<Full<Bytes>> {
     Response::builder()
         .status(StatusCode::NOT_FOUND)

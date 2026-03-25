@@ -10,8 +10,8 @@ use pyo3::types::PyString;
 
 use crate::interp;
 use crate::response::{
-    build_response, error_response, extract_response_data, not_found_response,
-    overloaded_response, payload_too_large_response,
+    build_response, error_response, extract_response_data, gateway_timeout_response,
+    not_found_response, overloaded_response, payload_too_large_response,
 };
 use crate::router::FrozenRoutes;
 use crate::static_fs::try_static_file;
@@ -381,9 +381,18 @@ pub(crate) async fn handle_request_subinterp(
         return Ok(full_body(overloaded_response(&e)));
     }
 
-    let result = match response_rx.await {
-        Ok(r) => r,
-        Err(_) => Err("worker thread dropped response".to_string()),
+    let result = match tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        response_rx,
+    )
+    .await
+    {
+        Ok(Ok(r)) => r,
+        Ok(Err(_)) => Err("worker thread dropped response".to_string()),
+        Err(_) => {
+            crate::monitor::DROPPED_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Ok(full_body(gateway_timeout_response()));
+        }
     };
 
     match result {

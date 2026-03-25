@@ -26,3 +26,4 @@ tungstenite = "0.26"
 futures-util = "0.3"
 dashmap = "6"
 tokio-stream = "0.1"
+mimalloc = { version = "0.1", default-features = false }
