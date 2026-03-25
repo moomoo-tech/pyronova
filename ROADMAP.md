@@ -21,7 +21,7 @@
 ## Phase 3 — Developer Experience (DONE ✓) — v0.3.0, 2026-03-24
 
 - [x] `Pyre` 装饰器语法 (`@app.get("/")`)
-- [x] `SkyResponse` — 自定义 status code / headers / content-type
+- [x] `PyreResponse` — 自定义 status code / headers / content-type
 - [x] `req.headers` — 请求头读取
 - [x] `req.query_params` — 查询参数解析
 - [x] `before_request` / `after_request` 中间件
@@ -65,7 +65,7 @@ Tracking issues:
 - `PyRun_String` 执行用户脚本（过滤掉框架代码）
 - `PyDict_GetItemString` 提取 handler 函数指针
 - `PyObject_Call` 直接调用 handler
-- 纯 Python `_SkyRequest` / `_SkyResponse` 替代 PyO3 的 `#[pyclass]`
+- 纯 Python `_PyreRequest` / `_PyreResponse` 替代 PyO3 的 `#[pyclass]`
 
 风险：裸指针、手动引用计数、无 RAII，但性能极佳。
 
@@ -84,7 +84,7 @@ Tracking issues:
 | 裸 `*mut ffi::PyObject` 指针 | 高 | ✅ 已修复 | `PyObjRef` RAII 包装，Drop 自动 DECREF |
 | 手动 `Py_INCREF/DECREF` | 高 | ✅ 已修复 | `from_owned` / `from_borrowed` / `into_raw` 安全接口 |
 | 脚本过滤是字符串匹配 | 中 | ✅ 已修复 | 改用 Python `ast.parse` + `ast.unparse`，精准过滤 |
-| `_SkyRequest` 是纯 Python 重写 | 中 | 🔄 保留 | 跟主解释器行为一致，暂无问题 |
+| `_PyreRequest` 是纯 Python 重写 | 中 | 🔄 保留 | 跟主解释器行为一致，暂无问题 |
 | 无 `Py_EndInterpreter` 清理 | 中 | ✅ 已修复 | worker 线程退出时自动 `Py_EndInterpreter` |
 | 子解释器里不能用 PyO3 扩展 | **致命** | 🔄 Step 2 | 需要 fork PyO3，见下方 |
 | 队头阻塞 (Round-robin + Mutex) | 高 | ✅ 已修复 | 改为 `crossbeam-channel` 多消费者池，真负载均衡 |
@@ -109,13 +109,13 @@ Tracking issues:
 ```
 src/
 ├── lib.rs          18 行   ← #[pymodule] + mod 声明
-├── types.rs       116 行   ← SkyRequest, SkyResponse, extract_headers
+├── types.rs       116 行   ← PyreRequest, PyreResponse, extract_headers
 ├── json.rs         44 行   ← py_to_json_value (Rust-side JSON 序列化)
 ├── router.rs       70 行   ← RouteTable, SharedRoutes
 ├── response.rs    164 行   ← extract_response_data, build/error/404 response
 ├── handlers.rs    218 行   ← handle_request (GIL), handle_request_subinterp
 ├── static_fs.rs    69 行   ← try_static_file, mime_from_ext
-├── app.rs         342 行   ← SkyApp, run_gil(), run_subinterp()
+├── app.rs         342 行   ← PyreApp, run_gil(), run_subinterp()
 └── interp.rs      820 行   ← PyObjRef RAII, channel pool, AST filter
 ```
 
@@ -129,7 +129,7 @@ Benchmark: SubInterp 215k (channel pool, -0.5% vs mutex), GIL 104k (+3%), Robyn 
 
 改完后：
 - Pyre 自己的 `#[pymodule]` 能在子解释器中加载
-- `SkyRequest` 等 `#[pyclass]` 可以直接传入子解释器，不再需要 `_SkyRequest` 纯 Python 替身
+- `PyreRequest` 等 `#[pyclass]` 可以直接传入子解释器，不再需要 `_PyreRequest` 纯 Python 替身
 - 声明了 `Py_MOD_PER_INTERPRETER_GIL_SUPPORTED` 的第三方 C 扩展也能用（numpy、orjson 等正在逐步加这个声明）
 
 ### Step 3: 等待/贡献上游（长期）
@@ -154,7 +154,7 @@ Client ←WebSocket→ Tokio (async) ←channels→ Python handler thread (sync)
 ```
 
 - 每个 WebSocket 连接分配一个 OS 线程运行 Python handler
-- `SkyWebSocket` pyclass 提供 `recv()` (阻塞) / `send(msg)` / `close()` 接口
+- `PyreWebSocket` pyclass 提供 `recv()` (阻塞) / `send(msg)` / `close()` 接口
 - 自动处理 Ping/Pong、连接关闭
 - 与 HTTP 路由共存，同一端口同时服务 HTTP + WebSocket
 - GIL 模式和 Hybrid 模式均支持
@@ -188,7 +188,7 @@ AI Agent 核心基础设施：token-by-token 流式输出。
 ```python
 @app.get("/stream", gil=True)
 def stream(req):
-    s = SkyStream()
+    s = PyreStream()
     def generate():
         for token in llm.generate(prompt):
             s.send_event(token)
@@ -199,13 +199,13 @@ def stream(req):
 
 **架构：**
 ```
-Python handler thread → SkyStream.send_event()
+Python handler thread → PyreStream.send_event()
                        → mpsc::UnboundedSender
                        → Tokio StreamBody (chunked transfer)
                        → HTTP client (EventSource)
 ```
 
-- `SkyStream` pyclass: `send(data)` / `send_event(data, event, id)` / `close()`
+- `PyreStream` pyclass: `send(data)` / `send_event(data, event, id)` / `close()`
 - 通道在 `__init__` 时创建，`send()` 立即可用（无需等待 connect）
 - `BoxBody` 统一响应类型（`Either<Full, StreamBody>`）
 - SSE 格式：`event: xxx\ndata: xxx\n\n`
@@ -282,7 +282,7 @@ def auth(req):
     try:
         return json.loads(app.state[f"session:{req.params['user']}"])
     except KeyError:
-        return SkyResponse(body={"error": "unauthorized"}, status_code=401)
+        return PyreResponse(body={"error": "unauthorized"}, status_code=401)
 ```
 
 **跨路由数据共享（numpy 计算结果 → 其他路由读取）：**
@@ -337,7 +337,7 @@ def hit_counter(req):
 ### 代码质量
 - [x] Bootstrap 脚本从 Rust 字符串抽离到 `_bootstrap.py` (via `include_str!`)
 - [x] 删除 `filter_script_ast` 死代码
-- [x] CORS/logging 从全局静态变量迁移到 `SkyApp` 实例字段
+- [x] CORS/logging 从全局静态变量迁移到 `PyreApp` 实例字段
 - [x] `PyObjRef::Drop` 加 `debug_assert!(PyGILState_Check())` GIL 安全断言
 - [x] `InterpreterPool::Drop` join worker threads (修复 Ctrl+C segfault)
 - [x] `cargo fmt` 全量格式化 + `cargo clippy` 32 个 warning 清零
@@ -391,6 +391,9 @@ def hit_counter(req):
 | 2026-03-23 | v0.2.0 | 216k | 100k | 76k | Phase 2+4: 子解释器，2.8x Robyn |
 | 2026-03-24 | v0.3.0 | 213k | 100k | 76k | Phase 3: DX 功能补全，零回归 |
 | 2026-03-24 | v0.3.1 | 215k | 104k | 83k | Phase 5.1: RAII + channel pool + 模块化拆分 + 安全修复 |
-| 2026-03-24 | v0.4.0 | 215k | 104k | 83k | Phase 6: Native WebSocket + Hybrid GIL |
-| 2026-03-24 | v0.5.0 | 217k/67MB | 74k state | 81k/~440MB | Phase 7+8: async bridge + SharedState + SSE |
+| 2026-03-24 | v0.4.0 | 215k | 104k | 83k | Phase 6: Native WebSocket + Hybrid GIL + 全面压测(54场景) |
+| 2026-03-24 | v0.4.0+ | 217k | 78k(47k IO) | 81k | spawn_blocking + 背压 + TCP_NODELAY, GIL IO +535%, 胜10/14场景 |
+| 2026-03-24 | v0.5.0 | — | 74k state | — | Phase 7 async + Phase 8 SharedState + DX (.pyi, async detect) |
+| 2026-03-24 | v0.5.0+ | — | — | — | Phase 6: SSE streaming (PyreStream) for AI Agent token output |
+| 2026-03-24 | v0.5.0 | 217k/67MB | 53k/GIL=0μs | 81k/~440MB | GIL Watchdog + 内存监控, SubInterp GIL=0μs 验证, 内存 6.6x 优势 |
 | **2026-03-25** | **v1.2.0** | **215k/752KB** | — | — | **Phase 9: 64M req stability, 97 tests, zero clippy warnings** |

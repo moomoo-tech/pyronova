@@ -95,9 +95,9 @@ def check(name, condition):
 # ==========================================================================
 
 GIL_SERVER = '''
-from skytrade import Pyre, SkyResponse, redirect
-from skytrade.cookies import get_cookie, set_cookie
-from skytrade.uploads import parse_multipart
+from pyreframework import Pyre, PyreResponse, redirect
+from pyreframework.cookies import get_cookie, set_cookie
+from pyreframework.uploads import parse_multipart
 import json
 
 app = Pyre()
@@ -121,7 +121,7 @@ def redir(req):
 
 @app.get("/set-cookie")
 def setcookie(req):
-    return set_cookie(SkyResponse(body="ok"), "sid", "abc123", httponly=True)
+    return set_cookie(PyreResponse(body="ok"), "sid", "abc123", httponly=True)
 
 @app.get("/get-cookie")
 def getcookie(req):
@@ -138,7 +138,7 @@ def jsonroute(req):
 
 @app.get("/error")
 def error(req):
-    return SkyResponse(body="nope", status_code=404)
+    return PyreResponse(body="nope", status_code=404)
 
 @app.get("/state-set/{key}/{val}")
 def state_set(req):
@@ -157,9 +157,9 @@ if __name__ == "__main__":
 '''
 
 SUBINTERP_SERVER = '''
-from skytrade import Pyre, SkyResponse, redirect
-from skytrade.cookies import get_cookie, set_cookie
-from skytrade.uploads import parse_multipart
+from pyreframework import Pyre, PyreResponse, redirect
+from pyreframework.cookies import get_cookie, set_cookie
+from pyreframework.uploads import parse_multipart
 import json
 
 app = Pyre()
@@ -183,7 +183,7 @@ def redir(req):
 
 @app.get("/set-cookie")
 def setcookie(req):
-    return set_cookie(SkyResponse(body="ok"), "sid", "abc123", httponly=True)
+    return set_cookie(PyreResponse(body="ok"), "sid", "abc123", httponly=True)
 
 @app.get("/get-cookie")
 def getcookie(req):
@@ -201,7 +201,7 @@ def jsonroute(req):
 
 @app.get("/error")
 def error(req):
-    return SkyResponse(body="nope", status_code=404)
+    return PyreResponse(body="nope", status_code=404)
 
 @app.get("/state-set/{key}/{val}", gil=True)
 def state_set(req):

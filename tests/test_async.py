@@ -1,5 +1,5 @@
 """Test: async def handlers in both GIL and sub-interpreter modes."""
-from skytrade import Pyre
+from pyreframework import Pyre
 
 app = Pyre()
 

@@ -4,14 +4,14 @@ Read cookies from request headers, set cookies on responses.
 
 Usage::
 
-    from skytrade.cookies import get_cookies, set_cookie
+    from pyreframework.cookies import get_cookies, set_cookie
 
     @app.get("/")
     def index(req):
         cookies = get_cookies(req)
         session = cookies.get("session_id", "none")
         return set_cookie(
-            SkyResponse(body=f"session={session}"),
+            PyreResponse(body=f"session={session}"),
             "session_id", "abc123",
             max_age=3600, httponly=True,
         )
@@ -55,12 +55,12 @@ def set_cookie(
     secure: bool = False,
     httponly: bool = False,
     samesite: str | None = "Lax",
-) -> "SkyResponse":
-    """Set a cookie on a SkyResponse.
+) -> "PyreResponse":
+    """Set a cookie on a PyreResponse.
 
-    Returns a new SkyResponse with the Set-Cookie header added.
+    Returns a new PyreResponse with the Set-Cookie header added.
     """
-    from skytrade.engine import SkyResponse
+    from pyreframework.engine import PyreResponse
 
     parts = [f"{name}={value}"]
     if max_age is not None:
@@ -82,7 +82,7 @@ def set_cookie(
     headers = dict(getattr(response, "headers", {}) or {})
     headers["set-cookie"] = cookie_str
 
-    return SkyResponse(
+    return PyreResponse(
         body=response.body,
         status_code=getattr(response, "status_code", 200),
         content_type=getattr(response, "content_type", None),
@@ -90,7 +90,7 @@ def set_cookie(
     )
 
 
-def delete_cookie(response, name: str, *, path: str = "/") -> "SkyResponse":
+def delete_cookie(response, name: str, *, path: str = "/") -> "PyreResponse":
     """Delete a cookie by setting it expired."""
     return set_cookie(
         response, name, "",

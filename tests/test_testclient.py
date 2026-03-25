@@ -1,8 +1,8 @@
 """Tests for TestClient and HTTP verbs."""
 
 import pytest
-from skytrade import Pyre, SkyResponse
-from skytrade.testing import TestClient
+from pyreframework import Pyre, PyreResponse
+from pyreframework.testing import TestClient
 
 
 @pytest.fixture(scope="module")
@@ -35,11 +35,11 @@ def client():
 
     @app.get("/status")
     def custom_status(req):
-        return SkyResponse(body="created", status_code=201)
+        return PyreResponse(body="created", status_code=201)
 
     @app.get("/headers")
     def custom_headers(req):
-        return SkyResponse(body="ok", headers={"x-custom": "test"})
+        return PyreResponse(body="ok", headers={"x-custom": "test"})
 
     c = TestClient(app, port=19877)
     yield c

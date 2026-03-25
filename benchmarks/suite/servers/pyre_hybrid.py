@@ -1,5 +1,5 @@
 """Pyre hybrid mode benchmark server — numpy routes on GIL, rest on sub-interp."""
-from skytrade import Pyre
+from pyreframework import Pyre
 import json
 
 app = Pyre()

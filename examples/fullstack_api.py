@@ -41,9 +41,9 @@ import json
 import hashlib
 import time
 from pydantic import BaseModel, Field, field_validator
-from skytrade import Pyre, SkyResponse, redirect
-from skytrade.cookies import get_cookie, set_cookie, delete_cookie
-from skytrade.uploads import parse_multipart
+from pyreframework import Pyre, PyreResponse, redirect
+from pyreframework.cookies import get_cookie, set_cookie, delete_cookie
+from pyreframework.uploads import parse_multipart
 
 app = Pyre()
 app.enable_cors()
@@ -105,7 +105,7 @@ def get_current_user(req) -> dict | None:
 def require_auth(req):
     user = get_current_user(req)
     if not user:
-        return SkyResponse(
+        return PyreResponse(
             body=json.dumps({"error": "unauthorized"}),
             status_code=401,
             content_type="application/json",
@@ -133,7 +133,7 @@ def index(req):
 def register(req, user: UserRegister):
     # Check if user exists
     if app.state.get(f"user:{user.username}"):
-        return SkyResponse(
+        return PyreResponse(
             body=json.dumps({"error": "username already taken"}),
             status_code=409,
             content_type="application/json",
@@ -155,7 +155,7 @@ def register(req, user: UserRegister):
 def login(req, creds: UserLogin):
     user_json = app.state.get(f"user:{creds.username}")
     if not user_json:
-        return SkyResponse(
+        return PyreResponse(
             body=json.dumps({"error": "invalid credentials"}),
             status_code=401,
             content_type="application/json",
@@ -163,7 +163,7 @@ def login(req, creds: UserLogin):
 
     user = json.loads(user_json)
     if user["password_hash"] != hash_password(creds.password):
-        return SkyResponse(
+        return PyreResponse(
             body=json.dumps({"error": "invalid credentials"}),
             status_code=401,
             content_type="application/json",
@@ -173,7 +173,7 @@ def login(req, creds: UserLogin):
     token = hashlib.sha256(f"{creds.username}:{time.time()}".encode()).hexdigest()[:32]
     app.state[f"session:{token}"] = json.dumps({"username": creds.username, "email": user["email"]})
 
-    resp = SkyResponse(body=json.dumps({"status": "logged in", "username": creds.username}),
+    resp = PyreResponse(body=json.dumps({"status": "logged in", "username": creds.username}),
                        content_type="application/json")
     return set_cookie(resp, "session_token", token, httponly=True, max_age=86400)
 
@@ -181,7 +181,7 @@ def login(req, creds: UserLogin):
 @app.get("/auth/me", gil=True)
 def me(req):
     auth = require_auth(req)
-    if isinstance(auth, SkyResponse):
+    if isinstance(auth, PyreResponse):
         return auth
     return auth
 
@@ -191,20 +191,20 @@ def logout(req):
     token = get_cookie(req, "session_token")
     if token:
         app.state.delete(f"session:{token}")
-    resp = SkyResponse(body=json.dumps({"status": "logged out"}), content_type="application/json")
+    resp = PyreResponse(body=json.dumps({"status": "logged out"}), content_type="application/json")
     return delete_cookie(resp, "session_token")
 
 
 @app.post("/auth/avatar", gil=True)
 def upload_avatar(req):
     auth = require_auth(req)
-    if isinstance(auth, SkyResponse):
+    if isinstance(auth, PyreResponse):
         return auth
 
     form = parse_multipart(req)
     avatar = form.get("avatar")
     if not avatar:
-        return SkyResponse(body=json.dumps({"error": "no avatar file"}), status_code=400,
+        return PyreResponse(body=json.dumps({"error": "no avatar file"}), status_code=400,
                            content_type="application/json")
 
     # Store avatar size (in real app, save to S3/disk)
@@ -248,7 +248,7 @@ def list_items(req):
 @app.post("/items", model=ItemCreate, gil=True)
 def create_item(req, item: ItemCreate):
     auth = require_auth(req)
-    if isinstance(auth, SkyResponse):
+    if isinstance(auth, PyreResponse):
         return auth
 
     items = json.loads(app.state.get("items_db") or "[]")
@@ -263,7 +263,7 @@ def create_item(req, item: ItemCreate):
     items.append(new_item)
     app.state["items_db"] = json.dumps(items)
 
-    return SkyResponse(
+    return PyreResponse(
         body=json.dumps(new_item),
         status_code=201,
         content_type="application/json",
@@ -277,14 +277,14 @@ def get_item(req):
     for item in items:
         if item["id"] == item_id:
             return item
-    return SkyResponse(body=json.dumps({"error": "not found"}), status_code=404,
+    return PyreResponse(body=json.dumps({"error": "not found"}), status_code=404,
                        content_type="application/json")
 
 
 @app.put("/items/{item_id}", model=ItemUpdate, gil=True)
 def update_item(req, updates: ItemUpdate):
     auth = require_auth(req)
-    if isinstance(auth, SkyResponse):
+    if isinstance(auth, PyreResponse):
         return auth
 
     item_id = int(req.params["item_id"])
@@ -300,14 +300,14 @@ def update_item(req, updates: ItemUpdate):
             app.state["items_db"] = json.dumps(items)
             return item
 
-    return SkyResponse(body=json.dumps({"error": "not found"}), status_code=404,
+    return PyreResponse(body=json.dumps({"error": "not found"}), status_code=404,
                        content_type="application/json")
 
 
 @app.delete("/items/{item_id}", gil=True)
 def delete_item(req):
     auth = require_auth(req)
-    if isinstance(auth, SkyResponse):
+    if isinstance(auth, PyreResponse):
         return auth
 
     item_id = int(req.params["item_id"])

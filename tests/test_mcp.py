@@ -2,7 +2,7 @@
 
 import json
 import pytest
-from skytrade.mcp import MCPServer, _extract_schema
+from pyreframework.mcp import MCPServer, _extract_schema
 
 
 # -- Schema extraction tests --------------------------------------------------

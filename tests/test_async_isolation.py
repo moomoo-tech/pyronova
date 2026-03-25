@@ -11,9 +11,9 @@ import os
 import signal
 
 SERVER_SCRIPT = """
-from skytrade import SkyApp
+from pyreframework import PyreApp
 
-app = SkyApp()
+app = PyreApp()
 
 async def slow(req):
     import asyncio

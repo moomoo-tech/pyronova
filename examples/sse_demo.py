@@ -1,7 +1,7 @@
 """SSE streaming demo — simulates AI Agent token-by-token output."""
 import time
 import threading
-from skytrade import Pyre, SkyStream
+from pyreframework import Pyre, PyreStream
 
 app = Pyre()
 
@@ -26,7 +26,7 @@ source.addEventListener('done', () => {
 @app.get("/stream", gil=True)
 def stream_tokens(req):
     """Simulate LLM streaming: emit tokens one by one."""
-    stream = SkyStream()
+    stream = PyreStream()
 
     def generate():
         tokens = "Hello! I am Pyre, a high-performance Python web framework powered by Rust. ".split()

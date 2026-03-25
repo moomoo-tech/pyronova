@@ -89,7 +89,7 @@ import asyncio, threading
 
 async def _process_request(req_id, handler_idx, method, path, query, body):
     handler = globals()[HANDLER_NAMES[handler_idx]]
-    req = _SkyRequest(method, path, {}, query, body, {})
+    req = _PyreRequest(method, path, {}, query, body, {})
     res = handler(req)
     if asyncio.iscoroutine(res):
         res = await res                    # ← 完美挂起，不阻塞线程！

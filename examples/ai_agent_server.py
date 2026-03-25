@@ -32,7 +32,7 @@ import json
 import time
 import threading
 from pydantic import BaseModel
-from skytrade import Pyre, SkyResponse, SkyStream
+from pyreframework import Pyre, PyreResponse, PyreStream
 
 app = Pyre()
 app.enable_cors()
@@ -145,7 +145,7 @@ def stream_chat(req):
     prompt = req.query_params.get("prompt", "hello")
     session_id = req.query_params.get("session_id", "default")
 
-    stream = SkyStream()
+    stream = PyreStream()
 
     def generate():
         full_response = []

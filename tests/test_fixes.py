@@ -1,12 +1,12 @@
 """Test: verify all bug fixes — middleware on GIL routes, body limit, etc."""
-from skytrade import Pyre, SkyResponse
+from pyreframework import Pyre, PyreResponse
 
 app = Pyre()
 
 
 @app.after_request
 def add_header(req, resp):
-    return SkyResponse(
+    return PyreResponse(
         body=resp.body,
         status_code=resp.status_code,
         content_type=resp.content_type,

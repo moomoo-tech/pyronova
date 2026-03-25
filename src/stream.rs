@@ -1,6 +1,6 @@
 //! SSE (Server-Sent Events) streaming response support.
 //!
-//! Handler returns a `SkyStream` object, then calls `stream.send("data")`
+//! Handler returns a `PyreStream` object, then calls `stream.send("data")`
 //! in a loop. Each send pushes a chunk to the HTTP response body.
 
 use bytes::Bytes;
@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 
 /// Python-facing stream object. Handler calls send()/send_event()/close().
 #[pyclass(frozen)]
-pub(crate) struct SkyStream {
+pub(crate) struct PyreStream {
     tx: mpsc::UnboundedSender<Result<Bytes, std::convert::Infallible>>,
     rx: std::sync::Mutex<Option<mpsc::UnboundedReceiver<Result<Bytes, std::convert::Infallible>>>>,
     /// Custom headers to include in the response
@@ -22,7 +22,7 @@ pub(crate) struct SkyStream {
 }
 
 #[pymethods]
-impl SkyStream {
+impl PyreStream {
     /// Create a new SSE stream. Channel is created immediately so send() works right away.
     #[new]
     #[pyo3(signature = (content_type=None, status_code=200, headers=None))]
@@ -32,7 +32,7 @@ impl SkyStream {
         headers: Option<std::collections::HashMap<String, String>>,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        SkyStream {
+        PyreStream {
             tx,
             rx: std::sync::Mutex::new(Some(rx)),
             content_type: content_type.unwrap_or_else(|| "text/event-stream".to_string()),
@@ -69,12 +69,12 @@ impl SkyStream {
     fn close(&self) {
         // Dropping tx would close the channel, but we can't drop a field.
         // Instead, send a special empty marker — the stream reader will just see channel closed
-        // when all senders are dropped (which happens when SkyStream is garbage collected).
-        // For explicit close, we do nothing — the channel closes when SkyStream is dropped.
+        // when all senders are dropped (which happens when PyreStream is garbage collected).
+        // For explicit close, we do nothing — the channel closes when PyreStream is dropped.
     }
 }
 
-impl SkyStream {
+impl PyreStream {
     /// Take the receiver (called once by Rust handler to start streaming).
     pub(crate) fn take_rx(
         &self,

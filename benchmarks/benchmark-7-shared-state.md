@@ -6,12 +6,12 @@
 |------|------|------|
 | **async handler** | `handlers.rs`, `interp.rs` | `async def` handler 自动检测 + `asyncio.run()` 桥接 |
 | **SharedState** | `state.rs` | `Arc<DashMap>` 跨子解释器状态共享，`app.state["key"]` |
-| **Type stubs** | `engine.pyi` | IDE 自动补全 SkyRequest/SkyResponse/SkyWebSocket |
+| **Type stubs** | `engine.pyi` | IDE 自动补全 PyreRequest/PyreResponse/PyreWebSocket |
 | **DashMap 依赖** | `Cargo.toml` | 新增 `dashmap = "6"` 并发哈希表 |
 
 ## 验证目标
 
-1. **SharedState (DashMap) 引入是否影响核心路由性能？** — DashMap 的 Arc 引用计数 + SkyApp 结构体变大
+1. **SharedState (DashMap) 引入是否影响核心路由性能？** — DashMap 的 Arc 引用计数 + PyreApp 结构体变大
 2. **async handler 检测逻辑是否拖慢 sync handler？** — 每次调用多一次 `PyCoro_CheckExact` 检查
 3. **spawn_blocking 在加入更多功能后是否仍然稳定？**
 

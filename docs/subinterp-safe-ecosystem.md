@@ -146,7 +146,7 @@ For connection pooling across sub-interpreters, use Pyre's `SharedState` to coor
 You don't have to choose one mode. Pyre's hybrid dispatch lets you mix sub-interpreter routes (fast, parallel) with GIL routes (full ecosystem access):
 
 ```python
-from skytrade import Pyre
+from pyreframework import Pyre
 
 app = Pyre()
 

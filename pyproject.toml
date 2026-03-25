@@ -3,7 +3,7 @@ requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "skytrade"
+name = "pyreframework"
 dynamic = ["version"]
 description = "High-performance Python web framework powered by Rust — 2x faster than Robyn"
 requires-python = ">=3.10"
@@ -23,4 +23,4 @@ classifiers = [
 [tool.maturin]
 features = ["pyo3/extension-module"]
 python-source = "python"
-module-name = "skytrade.engine"
+module-name = "pyreframework.engine"

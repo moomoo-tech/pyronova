@@ -8,8 +8,8 @@ from typing import Callable
 
 import os
 
-from skytrade.engine import SkyApp as _SkyApp, SkyResponse
-from skytrade.mcp import MCPServer
+from pyreframework.engine import PyreApp as _PyreApp, PyreResponse
+from pyreframework.mcp import MCPServer
 
 def _is_worker() -> bool:
     """Check if we're running inside a sub-interpreter worker."""
@@ -21,7 +21,7 @@ class Pyre:
 
     Usage::
 
-        from skytrade import Pyre
+        from pyreframework import Pyre
 
         app = Pyre()
 
@@ -51,7 +51,7 @@ class Pyre:
     """
 
     def __init__(self) -> None:
-        self._engine = _SkyApp()
+        self._engine = _PyreApp()
         self._fallback_handler: Callable | None = None
         self._fallback_name: str | None = None
         self._mcp = MCPServer()
@@ -113,7 +113,7 @@ class Pyre:
                     validated = mdl.model_validate_json(req.body)
                 except Exception as e:
                     # Return 422 Unprocessable Entity with validation errors
-                    return SkyResponse(
+                    return PyreResponse(
                         body=str(e),
                         status_code=422,
                         content_type="text/plain",
@@ -189,12 +189,12 @@ class Pyre:
         # Handle preflight OPTIONS + add CORS headers to all responses
         def _cors_before(req):
             if req.method == "OPTIONS":
-                return SkyResponse(body="", status_code=204, headers=cors_headers)
+                return PyreResponse(body="", status_code=204, headers=cors_headers)
             return None
 
         def _cors_after(req, resp):
             merged = {**getattr(resp, "headers", {}), **cors_headers}
-            return SkyResponse(
+            return PyreResponse(
                 body=resp.body,
                 status_code=resp.status_code,
                 content_type=resp.content_type,
@@ -220,7 +220,7 @@ class Pyre:
             def get_data(req):
                 return {"prices": [150.1, 150.2]}
         """
-        from skytrade.rpc import rpc_decorator
+        from pyreframework.rpc import rpc_decorator
         return rpc_decorator(self, path, proto_model)
 
     # ------------------------------------------------------------------
@@ -245,7 +245,7 @@ class Pyre:
         """Register an after-request hook. Use as decorator or direct call.
 
         The hook receives ``(request, response)`` and must return a
-        ``SkyResponse``.
+        ``PyreResponse``.
         """
         if handler is not None:
             self._engine.after_request(handler)
@@ -280,7 +280,7 @@ class Pyre:
     def websocket(self, path: str, handler: Callable | None = None):
         """Register a WebSocket handler. Use as decorator or direct call.
 
-        The handler receives a ``SkyWebSocket`` object with ``recv()``,
+        The handler receives a ``PyreWebSocket`` object with ``recv()``,
         ``send(msg)``, and ``close()`` methods::
 
             @app.websocket("/ws")
@@ -406,7 +406,7 @@ class Pyre:
             def _mcp_handler(req):
                 body = req.text()
                 result = mcp.handle_request(body)
-                return SkyResponse(
+                return PyreResponse(
                     body=result,
                     content_type="application/json",
                 )

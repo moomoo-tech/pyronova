@@ -2,7 +2,7 @@
 without AST filtering. Covers decorator syntax, multi-file imports,
 custom variable names, and middleware."""
 
-from skytrade import Pyre, SkyResponse
+from pyreframework import Pyre, PyreResponse
 
 # Custom variable name (not "app" — old AST filter would miss this)
 my_server = Pyre()
@@ -27,7 +27,7 @@ def with_query(req):
 # Middleware (should work in sub-interp after_request fix)
 @my_server.after_request
 def add_header(req, resp):
-    return _SkyResponse(
+    return _PyreResponse(
         body=resp.body,
         status_code=resp.status_code,
         content_type=resp.content_type,

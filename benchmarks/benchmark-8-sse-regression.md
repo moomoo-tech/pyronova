@@ -4,14 +4,14 @@
 
 | 功能 | 文件 | 说明 |
 |------|------|------|
-| **SSE 流式传输** | `stream.rs`, `handlers.rs` | `SkyStream` pyclass, chunked transfer, AI Agent token 流式输出 |
+| **SSE 流式传输** | `stream.rs`, `handlers.rs` | `PyreStream` pyclass, chunked transfer, AI Agent token 流式输出 |
 | **BoxBody 统一响应类型** | `handlers.rs` | `Either<Full, StreamBody>` 支持普通 + 流式响应 |
 | **full_body() 包装** | `handlers.rs`, `websocket.rs` | 所有 `Response<Full<Bytes>>` 通过 `full_body()` 转为 `BoxBody` |
 
 ## 验证目标
 
 1. **BoxBody 类型包装是否引入额外开销？** — 每个普通响应多一层 `Either::Left` 包装
-2. **SkyStream 检测逻辑（type_name 比较）是否拖慢正常路由？** — 每次响应多一次类型名检查
+2. **PyreStream 检测逻辑（type_name 比较）是否拖慢正常路由？** — 每次响应多一次类型名检查
 3. **tokio-stream 依赖是否影响 Tokio runtime 行为？**
 
 ## 完整结果 (wrk -t4 -c256 -d10s)
@@ -63,9 +63,9 @@
 
 ## 结论
 
-**SSE streaming (SkyStream + BoxBody + tokio-stream) 引入零性能回归。**
+**SSE streaming (PyreStream + BoxBody + tokio-stream) 引入零性能回归。**
 
-BoxBody 的 `Either::Left` 包装和 `type_name == "SkyStream"` 检查均为常量时间操作，
+BoxBody 的 `Either::Left` 包装和 `type_name == "PyreStream"` 检查均为常量时间操作，
 对热路径无可测量影响。四轮压测确认 SubInterp ~215k 基线稳固。
 
 ## 四轮压测趋势

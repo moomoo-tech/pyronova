@@ -1,14 +1,14 @@
 """Test: after_request hooks work in sub-interpreter mode."""
-from skytrade import SkyApp
+from pyreframework import PyreApp
 
-app = SkyApp()
+app = PyreApp()
 
 
 def add_cors(req, resp):
     """after_request hook: add CORS header."""
-    # In sub-interp, _SkyResponse is available in globals
-    # Return a _SkyResponse with extra headers
-    return _SkyResponse(
+    # In sub-interp, _PyreResponse is available in globals
+    # Return a _PyreResponse with extra headers
+    return _PyreResponse(
         body=resp.body,
         status_code=resp.status_code,
         content_type=resp.content_type,

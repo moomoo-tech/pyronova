@@ -1,6 +1,6 @@
 """Test: Hybrid mode — fast routes on sub-interp, numpy routes on GIL."""
 
-from skytrade import Pyre, SkyResponse
+from pyreframework import Pyre, PyreResponse
 
 app = Pyre()
 

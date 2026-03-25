@@ -30,7 +30,7 @@ Test:
 
   # RPC call
   python -c "
-  from skytrade import PyreRPCClient
+  from pyreframework import PyreRPCClient
   with PyreRPCClient('http://127.0.0.1:8000') as c:
       print(c.get_signals(tickers=['AAPL', 'TSLA']))
   "
@@ -41,7 +41,7 @@ import time
 import random
 import threading
 from pydantic import BaseModel, Field
-from skytrade import Pyre, SkyResponse
+from pyreframework import Pyre, PyreResponse
 
 app = Pyre()
 app.enable_cors()

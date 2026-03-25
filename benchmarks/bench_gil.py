@@ -1,13 +1,13 @@
 """Benchmark: GIL mode with decorator syntax + middleware + fallback (no logging)."""
 
-from skytrade import Pyre, SkyResponse
+from pyreframework import Pyre, PyreResponse
 
 app = Pyre()
 
 
 @app.after_request
 def add_cors(req, resp):
-    return SkyResponse(
+    return PyreResponse(
         body=resp.body,
         status_code=resp.status_code,
         content_type=resp.content_type,
@@ -35,7 +35,7 @@ def search(req):
 
 @app.fallback
 def not_found(req):
-    return SkyResponse(
+    return PyreResponse(
         body={"error": "not found", "path": req.path},
         status_code=404,
         content_type="application/json",

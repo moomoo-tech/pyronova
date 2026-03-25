@@ -85,8 +85,8 @@ let config = ffi::PyInterpreterConfig {
 2. `#[pymodule]` 的全局 `static` 状态 → 迁移到 `PyModule_GetState`（per-interpreter 隔离）
 
 **效果**：
-- `SkyRequest` / `SkyResponse` 的 `#[pyclass]` 直接在子解释器中可用
-- 干掉 `_SkyRequest` / `_SkyResponse` 纯 Python 替身（减少维护 + 统一行为）
+- `PyreRequest` / `PyreResponse` 的 `#[pyclass]` 直接在子解释器中可用
+- 干掉 `_PyreRequest` / `_PyreResponse` 纯 Python 替身（减少维护 + 统一行为）
 - 基于 PyO3 的第三方扩展也能通过 fork 版本编译使用
 
 **不解决的问题**：

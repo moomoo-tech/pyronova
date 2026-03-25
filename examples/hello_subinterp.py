@@ -7,9 +7,9 @@ Usage:
     python examples/hello_subinterp.py
 """
 
-from skytrade import SkyApp
+from pyreframework import PyreApp
 
-app = SkyApp()
+app = PyreApp()
 
 
 def index(req):

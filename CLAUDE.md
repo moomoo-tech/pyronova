@@ -8,20 +8,20 @@ High-performance Python web framework powered by Rust. Per-Interpreter GIL (PEP 
 
 - **Rust core** (`src/`): 12 modules
   - `lib.rs` — module declarations, `#[pymodule]`, mimalloc global allocator
-  - `types.rs` — `SkyRequest`, `SkyResponse`, `extract_headers`
-  - `app.rs` — `SkyApp` with `run_gil()` / `run_subinterp()`, graceful shutdown
+  - `types.rs` — `PyreRequest`, `PyreResponse`, `extract_headers`
+  - `app.rs` — `PyreApp` with `run_gil()` / `run_subinterp()`, graceful shutdown
   - `handlers.rs` — GIL handler, sub-interp handler (30s zombie timeout), streaming
   - `router.rs` — `RouteTable`, `MutableRoutes`, `FrozenRoutes`
   - `response.rs` — response builders (200/404/413/500/503/504)
   - `json.rs` — Rust-side `py_to_json_value` serializer
   - `static_fs.rs` — async static file serving + MIME detection + path traversal protection
   - `interp.rs` — `PyObjRef` RAII, C-FFI bridge (`pyre_recv`/`pyre_send`), dual worker pool (sync+async), mock module injection
-  - `websocket.rs` — WebSocket upgrade, `SkyWebSocket` pyclass, async↔sync bridge
-  - `stream.rs` — `SkyStream` SSE with mpsc channel
+  - `websocket.rs` — WebSocket upgrade, `PyreWebSocket` pyclass, async↔sync bridge
+  - `stream.rs` — `PyreStream` SSE with mpsc channel
   - `monitor.rs` — GIL watchdog, memory RSS, atomic counters
   - `state.rs` — `SharedState` backed by `Arc<DashMap>`
-- **Python interface** (`python/skytrade/`):
-  - `engine` (Rust): `SkyApp`, `SkyRequest`, `SkyResponse`, `SkyWebSocket`, `SharedState`, `SkyStream`
+- **Python interface** (`python/pyreframework/`):
+  - `engine` (Rust): `PyreApp`, `PyreRequest`, `PyreResponse`, `PyreWebSocket`, `SharedState`, `PyreStream`
   - `app.py`: `Pyre` class — decorators, CORS, logging, Pydantic model=, env var config, hot reload, dual pool auto-detection
   - `mcp.py`: MCP server (JSON-RPC 2.0) with tool/resource/prompt decorators
   - `rpc.py`: MsgPack RPC + `PyreRPCClient` magic client
@@ -30,7 +30,7 @@ High-performance Python web framework powered by Rust. Per-Interpreter GIL (PEP 
   - `testing.py`: `TestClient` for tests without a running server
   - `_async_engine.py`: Async engine script injected into sub-interpreter workers
   - `engine.pyi`: Type stubs for IDE autocomplete
-- **Build**: Maturin (mixed python/rust project), module name `skytrade.engine`
+- **Build**: Maturin (mixed python/rust project), module name `pyreframework.engine`
 
 ## Development
 
@@ -60,18 +60,18 @@ bash benchmarks/run_bench.sh
 
 - Route table uses index-based lookup (`Vec<Py<PyAny>>` + `Router<usize>`) to avoid `Py<PyAny>` Clone issues in PyO3 0.28
 - GIL released via `py.detach()` during Tokio event loop, reacquired via `Python::attach()` per-request
-- `#[pyclass(frozen)]` on SkyRequest/SkyResponse for thread safety
-- `Pyre` Python wrapper provides decorator syntax; `SkyApp` is the raw Rust engine
+- `#[pyclass(frozen)]` on PyreRequest/PyreResponse for thread safety
+- `Pyre` Python wrapper provides decorator syntax; `PyreApp` is the raw Rust engine
 - Sub-interpreter mode uses `crossbeam-channel` multi-consumer pool with `tokio::sync::oneshot` async responses
 - `PyObjRef` RAII wrapper for all raw FFI pointer operations — Drop auto-DECREFs
 - C-FFI bridge (`pyre_recv`/`pyre_send`) for native async in sub-interpreters — releases GIL during channel wait
 - Hybrid dispatch: `gil=True` routes go to main interpreter (for C extensions), others to sub-interpreters
 - Auto dual-pool: framework detects `async def` vs `def` handlers, routes to appropriate worker pool
-- Mock module injection in sub-interpreters for pydantic/skytrade submodules
+- Mock module injection in sub-interpreters for pydantic/pyreframework submodules
 - Static files served via Tokio async fs — no GIL needed
 - Middleware: before_request/after_request hooks stored in RouteTable
 - WebSocket: tokio-tungstenite async ↔ Python sync via dual channels, one OS thread per connection
-- SSE: `SkyStream` with mpsc unbounded channel, returned from handler
+- SSE: `PyreStream` with mpsc unbounded channel, returned from handler
 - mimalloc global allocator for high-concurrency allocation performance
 - 30s zombie request timeout in sub-interpreter mode (504 Gateway Timeout)
 - Graceful shutdown via `signal::ctrl_c()` + `tokio::select!`
@@ -81,19 +81,19 @@ bash benchmarks/run_bench.sh
 ```
 src/
   lib.rs              # Module declarations + #[pymodule] + mimalloc
-  types.rs            # SkyRequest, SkyResponse, extract_headers
-  app.rs              # SkyApp — route registration + server startup
+  types.rs            # PyreRequest, PyreResponse, extract_headers
+  app.rs              # PyreApp — route registration + server startup
   handlers.rs         # handle_request (GIL), handle_request_subinterp (channel)
   router.rs           # RouteTable, MutableRoutes, FrozenRoutes
   response.rs         # Response builders, extract_response_data
   json.rs             # py_to_json_value
   static_fs.rs        # try_static_file, mime_from_ext
   interp.rs           # PyObjRef RAII, C-FFI bridge, dual worker pool, mock injection
-  websocket.rs        # SkyWebSocket, upgrade handler, async↔sync bridge
-  stream.rs           # SkyStream SSE
+  websocket.rs        # PyreWebSocket, upgrade handler, async↔sync bridge
+  stream.rs           # PyreStream SSE
   monitor.rs          # GIL watchdog, memory RSS, atomic counters
   state.rs            # SharedState (DashMap)
-python/skytrade/
+python/pyreframework/
   __init__.py         # Re-exports all public APIs
   app.py              # Pyre class (decorators, CORS, logging, config)
   mcp.py              # MCP server (JSON-RPC 2.0)

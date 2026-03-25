@@ -1,8 +1,8 @@
 """Test: C/C++ extensions (numpy, orjson) in sub-interpreter mode."""
 
-from skytrade import SkyApp
+from pyreframework import PyreApp
 
-app = SkyApp()
+app = PyreApp()
 
 
 def numpy_test(req):

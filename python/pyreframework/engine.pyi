@@ -1,8 +1,8 @@
-"""Type stubs for skytrade.engine (Rust extension module)."""
+"""Type stubs for pyreframework.engine (Rust extension module)."""
 
 from typing import Optional
 
-class SkyRequest:
+class PyreRequest:
     method: str
     path: str
     params: dict[str, str]
@@ -13,7 +13,7 @@ class SkyRequest:
     def text(self) -> str: ...
     def json(self) -> dict: ...
 
-class SkyResponse:
+class PyreResponse:
     body: object
     status_code: int
     content_type: Optional[str]
@@ -26,12 +26,12 @@ class SkyResponse:
         headers: Optional[dict[str, str]] = None,
     ) -> None: ...
 
-class SkyWebSocket:
+class PyreWebSocket:
     def recv(self) -> Optional[str]: ...
     def send(self, msg: str) -> None: ...
     def close(self) -> None: ...
 
-class SkyApp:
+class PyreApp:
     def __init__(self) -> None: ...
     def get(self, path: str, handler: object, gil: bool = False) -> None: ...
     def post(self, path: str, handler: object, gil: bool = False) -> None: ...

@@ -1,10 +1,10 @@
 [package]
-name = "skytrade-engine"
+name = "pyreframework-engine"
 version = "1.2.0"
 edition = "2021"
 
 [lib]
-name = "skytrade_engine"
+name = "pyreframework_engine"
 crate-type = ["cdylib"]
 
 [dependencies]

@@ -76,7 +76,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/skytrade
+      url: https://pypi.org/p/pyreframework
     permissions:
       id-token: write
     steps:

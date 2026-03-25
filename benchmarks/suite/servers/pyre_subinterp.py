@@ -1,8 +1,8 @@
 """Pyre sub-interpreter mode benchmark server."""
-from skytrade import SkyApp
+from pyreframework import PyreApp
 import json
 
-app = SkyApp()
+app = PyreApp()
 
 # --- Group 1: Basic throughput ---
 def t1_hello(req):

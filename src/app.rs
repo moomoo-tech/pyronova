@@ -18,7 +18,7 @@ use crate::state::SharedState;
 use crate::websocket;
 
 #[pyclass]
-pub(crate) struct SkyApp {
+pub(crate) struct PyreApp {
     routes: MutableRoutes,
     script_path: Option<String>,
     shared_state: Arc<dashmap::DashMap<String, Vec<u8>>>,
@@ -29,10 +29,10 @@ pub(crate) struct SkyApp {
 }
 
 #[pymethods]
-impl SkyApp {
+impl PyreApp {
     #[new]
     fn new() -> Self {
-        SkyApp {
+        PyreApp {
             routes: Arc::new(parking_lot::RwLock::new(RouteTable::new())),
             script_path: None,
             shared_state: Arc::new(dashmap::DashMap::new()),
@@ -218,7 +218,7 @@ impl SkyApp {
     }
 }
 
-impl SkyApp {
+impl PyreApp {
     fn add_route(
         &mut self,
         method: &str,

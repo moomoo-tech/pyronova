@@ -7,7 +7,7 @@
 - **Native async bridge (C-FFI)** — `pyre_recv`/`pyre_send` release GIL during channel wait, enabling true async in sub-interpreters.
 - **MCP Server** — JSON-RPC 2.0 with `@app.mcp.tool()`, `@app.mcp.resource()`, `@app.mcp.prompt()` decorators.
 - **MsgPack RPC** — `@app.rpc()` with content negotiation (MsgPack/JSON) + `PyreRPCClient` magic client.
-- **SSE Streaming** — `SkyStream` with mpsc channel, returned directly from handlers.
+- **SSE Streaming** — `PyreStream` with mpsc channel, returned directly from handlers.
 - **SharedState** — Cross-worker `app.state` backed by `Arc<DashMap>`, nanosecond latency.
 - **GIL Watchdog** — Monitor GIL contention, hold time, queue depth, memory RSS.
 - **Backpressure** — Bounded channels with `try_send()`, returns 503 on overload.
@@ -16,9 +16,9 @@
 - **Hybrid dispatch** — `gil=True` routes auto-dispatch to main interpreter for C extension compatibility.
 
 ### Code Quality
-- Extracted bootstrap script from Rust string to `python/skytrade/_bootstrap.py` (`include_str!`).
+- Extracted bootstrap script from Rust string to `python/pyreframework/_bootstrap.py` (`include_str!`).
 - Removed dead `filter_script_ast` code.
-- Moved CORS/logging from global statics to per-instance `SkyApp` fields.
+- Moved CORS/logging from global statics to per-instance `PyreApp` fields.
 - Added `debug_assert!(PyGILState_Check())` in `PyObjRef::Drop`.
 - Full `cargo fmt` + zero clippy warnings.
 - Migrated deprecated PyO3 `downcast` → `cast` calls.

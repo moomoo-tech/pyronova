@@ -6,7 +6,7 @@ read resources, and use prompt templates.
 
 Usage::
 
-    from skytrade import Pyre
+    from pyreframework import Pyre
 
     app = Pyre()
 
@@ -191,7 +191,7 @@ class MCPServer:
                 "resources": {"subscribe": False, "listChanged": False},
                 "prompts": {"listChanged": False},
             },
-            "serverInfo": {"name": "pyre-mcp", "version": __import__("skytrade").__version__},
+            "serverInfo": {"name": "pyre-mcp", "version": __import__("pyreframework").__version__},
         }
 
     def _handle_tools_list(self, params: dict) -> dict:

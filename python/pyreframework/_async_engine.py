@@ -26,13 +26,13 @@ async def _process_request(req_id, handler_idx, method, path, query, body_bytes,
 
         import json as _json
         headers = _json.loads(headers_json) if headers_json else {}
-        req = _SkyRequest(method, path, {}, query, body_bytes, headers)
+        req = _PyreRequest(method, path, {}, query, body_bytes, headers)
         res = handler(req)
 
         if asyncio.iscoroutine(res):
             res = await res
 
-        if isinstance(res, _SkyResponse):
+        if isinstance(res, _PyreResponse):
             body = (
                 str(res.body).encode("utf-8")
                 if not isinstance(res.body, bytes)

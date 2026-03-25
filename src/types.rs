@@ -4,12 +4,12 @@ use bytes::Bytes;
 use pyo3::prelude::*;
 
 // ---------------------------------------------------------------------------
-// SkyRequest
+// PyreRequest
 // ---------------------------------------------------------------------------
 
 #[pyclass(frozen, skip_from_py_object)]
 #[derive(Clone)]
-pub(crate) struct SkyRequest {
+pub(crate) struct PyreRequest {
     #[pyo3(get)]
     pub(crate) method: String,
     #[pyo3(get)]
@@ -24,7 +24,7 @@ pub(crate) struct SkyRequest {
 }
 
 #[pymethods]
-impl SkyRequest {
+impl PyreRequest {
     #[getter]
     fn body(&self) -> &[u8] {
         &self.body_bytes
@@ -50,11 +50,11 @@ impl SkyRequest {
 }
 
 // ---------------------------------------------------------------------------
-// SkyResponse
+// PyreResponse
 // ---------------------------------------------------------------------------
 
 #[pyclass(frozen)]
-pub(crate) struct SkyResponse {
+pub(crate) struct PyreResponse {
     #[pyo3(get)]
     pub(crate) body: Py<PyAny>,
     #[pyo3(get)]
@@ -66,7 +66,7 @@ pub(crate) struct SkyResponse {
 }
 
 #[pymethods]
-impl SkyResponse {
+impl PyreResponse {
     #[new]
     #[pyo3(signature = (body, status_code=200, content_type=None, headers=None))]
     fn new(
@@ -75,7 +75,7 @@ impl SkyResponse {
         content_type: Option<String>,
         headers: Option<HashMap<String, String>>,
     ) -> Self {
-        SkyResponse {
+        PyreResponse {
             body,
             status_code,
             content_type,
@@ -149,7 +149,7 @@ mod tests {
 
     #[test]
     fn query_params_parsing() {
-        let req = SkyRequest {
+        let req = PyreRequest {
             method: "GET".to_string(),
             path: "/search".to_string(),
             params: HashMap::new(),
@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn query_params_empty() {
-        let req = SkyRequest {
+        let req = PyreRequest {
             method: "GET".to_string(),
             path: "/".to_string(),
             params: HashMap::new(),
@@ -178,7 +178,7 @@ mod tests {
 
     #[test]
     fn query_params_percent_encoded() {
-        let req = SkyRequest {
+        let req = PyreRequest {
             method: "GET".to_string(),
             path: "/".to_string(),
             params: HashMap::new(),

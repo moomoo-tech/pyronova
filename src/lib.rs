@@ -18,12 +18,12 @@ use pyo3::prelude::*;
 
 #[pymodule]
 fn engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<app::SkyApp>()?;
-    m.add_class::<types::SkyRequest>()?;
-    m.add_class::<types::SkyResponse>()?;
-    m.add_class::<websocket::SkyWebSocket>()?;
+    m.add_class::<app::PyreApp>()?;
+    m.add_class::<types::PyreRequest>()?;
+    m.add_class::<types::PyreResponse>()?;
+    m.add_class::<websocket::PyreWebSocket>()?;
     m.add_class::<state::SharedState>()?;
-    m.add_class::<stream::SkyStream>()?;
+    m.add_class::<stream::PyreStream>()?;
     m.add_function(pyo3::wrap_pyfunction!(monitor::get_gil_metrics, m)?)?;
     Ok(())
 }

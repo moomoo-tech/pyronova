@@ -1,8 +1,8 @@
 """Unit tests for cookie utilities (no server needed)."""
 
 import pytest
-from skytrade.cookies import get_cookies, get_cookie, set_cookie, delete_cookie
-from skytrade.engine import SkyResponse
+from pyreframework.cookies import get_cookies, get_cookie, set_cookie, delete_cookie
+from pyreframework.engine import PyreResponse
 
 
 class FakeRequest:
@@ -46,7 +46,7 @@ def test_get_cookie_missing():
 
 
 def test_set_cookie_basic():
-    resp = SkyResponse(body="ok")
+    resp = PyreResponse(body="ok")
     result = set_cookie(resp, "session", "abc123")
     cookie_header = result.headers.get("set-cookie", "")
     assert "session=abc123" in cookie_header
@@ -54,7 +54,7 @@ def test_set_cookie_basic():
 
 
 def test_set_cookie_httponly():
-    resp = SkyResponse(body="ok")
+    resp = PyreResponse(body="ok")
     result = set_cookie(resp, "token", "secret", httponly=True, secure=True)
     cookie_header = result.headers.get("set-cookie", "")
     assert "HttpOnly" in cookie_header
@@ -62,14 +62,14 @@ def test_set_cookie_httponly():
 
 
 def test_set_cookie_max_age():
-    resp = SkyResponse(body="ok")
+    resp = PyreResponse(body="ok")
     result = set_cookie(resp, "prefs", "dark", max_age=3600)
     cookie_header = result.headers.get("set-cookie", "")
     assert "Max-Age=3600" in cookie_header
 
 
 def test_delete_cookie():
-    resp = SkyResponse(body="ok")
+    resp = PyreResponse(body="ok")
     result = delete_cookie(resp, "session")
     cookie_header = result.headers.get("set-cookie", "")
     assert "session=" in cookie_header

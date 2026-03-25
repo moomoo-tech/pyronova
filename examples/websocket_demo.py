@@ -1,6 +1,6 @@
 """WebSocket demo — echo server + broadcast example."""
 
-from skytrade import Pyre
+from pyreframework import Pyre
 
 app = Pyre()
 

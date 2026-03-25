@@ -21,17 +21,17 @@ enum WsMsg {
 }
 
 // ---------------------------------------------------------------------------
-// SkyWebSocket — Python-facing WebSocket connection object
+// PyreWebSocket — Python-facing WebSocket connection object
 // ---------------------------------------------------------------------------
 
 #[pyclass]
-pub(crate) struct SkyWebSocket {
+pub(crate) struct PyreWebSocket {
     incoming_rx: std::sync::Mutex<std::sync::mpsc::Receiver<WsMsg>>,
     outgoing_tx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<WsMsg>>>,
 }
 
 #[pymethods]
-impl SkyWebSocket {
+impl PyreWebSocket {
     /// Receive next text message. Returns None if connection closed.
     fn recv(&self) -> Option<String> {
         let rx = self.incoming_rx.lock().unwrap();
@@ -202,7 +202,7 @@ where
     let (incoming_tx, incoming_rx) = std::sync::mpsc::channel::<WsMsg>();
     let (outgoing_tx, mut outgoing_rx) = tokio::sync::mpsc::unbounded_channel::<WsMsg>();
 
-    let sky_ws = SkyWebSocket {
+    let sky_ws = PyreWebSocket {
         incoming_rx: std::sync::Mutex::new(incoming_rx),
         outgoing_tx: std::sync::Mutex::new(Some(outgoing_tx)),
     };

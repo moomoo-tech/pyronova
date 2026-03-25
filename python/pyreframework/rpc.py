@@ -101,9 +101,9 @@ def rpc_decorator(app, path: str, proto_model=None):
             envelope = {"ok": True, "result": result}
 
             if HAS_MSGPACK and "msgpack" in accept:
-                from skytrade.engine import SkyResponse
+                from pyreframework.engine import PyreResponse
                 body = msgpack.packb(envelope, use_bin_type=True)
-                return SkyResponse(body=body, content_type="application/msgpack")
+                return PyreResponse(body=body, content_type="application/msgpack")
             else:
                 return envelope  # Framework auto-serializes dict as JSON
 

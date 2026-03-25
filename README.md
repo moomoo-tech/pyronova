@@ -14,7 +14,7 @@ Built on Per-Interpreter GIL (PEP 684) and a Rust async core, Pyre runs Python h
 - **Observable** — GIL watchdog, backpressure (503), request timeout (504)
 
 ```python
-from skytrade import Pyre
+from pyreframework import Pyre
 
 app = Pyre()
 
@@ -125,7 +125,7 @@ Followed by 3 additional 1-minute phases (path params, JSON POST, CPU-bound fib1
 | **SharedState** (cross-worker) | Built-in (DashMap, nanosecond) | Not supported (needs Redis) |
 | **MCP Server** (AI tool protocol) | Built-in | Supported (experimental) |
 | **MsgPack RPC** | Built-in + magic client | Not supported |
-| **SSE Streaming** | Built-in (SkyStream) | Supported |
+| **SSE Streaming** | Built-in (PyreStream) | Supported |
 | **GIL Watchdog** | Built-in (contention + hold time) | Not supported |
 | **Backpressure** (503 overload) | Built-in (bounded channels) | Not supported |
 | **Request Timeout** (504) | Built-in (30s zombie reaper) | Not supported |
@@ -339,7 +339,7 @@ curl -X POST http://127.0.0.1:8000/mcp \
 curl http://127.0.0.1:8000/memory/user1
 ```
 
-**Features used:** MCP Server, SSE (SkyStream), async handlers, SharedState, Pydantic, CORS
+**Features used:** MCP Server, SSE (PyreStream), async handlers, SharedState, Pydantic, CORS
 
 ### Trading Data API (`examples/trading_api.py`)
 
@@ -361,7 +361,7 @@ curl http://127.0.0.1:8000/analytics/portfolio
 
 # RPC call from another service
 python -c "
-from skytrade import PyreRPCClient
+from pyreframework import PyreRPCClient
 with PyreRPCClient('http://127.0.0.1:8000') as c:
     print(c.get_signals(tickers=['AAPL', 'TSLA']))
 "
@@ -401,7 +401,7 @@ curl http://127.0.0.1:8000/items?page=1&per_page=10
 ### Basic API
 
 ```python
-from skytrade import Pyre, SkyResponse
+from pyreframework import Pyre, PyreResponse
 
 app = Pyre()
 
@@ -465,11 +465,11 @@ app.enable_cors(allow_origins=["https://example.com"], allow_credentials=True)
 ### Cookies
 
 ```python
-from skytrade.cookies import get_cookie, set_cookie, delete_cookie
+from pyreframework.cookies import get_cookie, set_cookie, delete_cookie
 
 @app.get("/login")
 def login(req):
-    return set_cookie(SkyResponse(body="ok"), "session", "abc", httponly=True)
+    return set_cookie(PyreResponse(body="ok"), "session", "abc", httponly=True)
 
 @app.get("/me")
 def me(req):
@@ -479,7 +479,7 @@ def me(req):
 ### File Upload
 
 ```python
-from skytrade.uploads import parse_multipart
+from pyreframework.uploads import parse_multipart
 
 @app.post("/upload")
 def upload(req):
@@ -490,7 +490,7 @@ def upload(req):
 ### Redirect
 
 ```python
-from skytrade import redirect
+from pyreframework import redirect
 
 @app.get("/old")
 def old(req):
@@ -511,12 +511,12 @@ def echo(ws):
 ### SSE Streaming
 
 ```python
-from skytrade import SkyStream
+from pyreframework import PyreStream
 import threading
 
 @app.get("/stream", gil=True)
 def stream(req):
-    s = SkyStream()
+    s = PyreStream()
     def gen():
         for token in ["Hello", " ", "World"]:
             s.send_event(token)
@@ -542,7 +542,7 @@ def compute(data):
     return {"result": data["a"] + data["b"]}
 
 # Client:
-from skytrade import PyreRPCClient
+from pyreframework import PyreRPCClient
 with PyreRPCClient("http://server:8000") as c:
     c.compute(a=3, b=5)  # → {"result": 8}
 ```
@@ -578,7 +578,7 @@ PYRE_METRICS=1 python app.py   # Enable GIL watchdog
 ## Testing
 
 ```python
-from skytrade.testing import TestClient
+from pyreframework.testing import TestClient
 
 client = TestClient(app)
 resp = client.get("/")

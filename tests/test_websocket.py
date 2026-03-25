@@ -12,7 +12,7 @@ import pytest
 PYTHON = sys.executable
 
 WS_SERVER = '''
-from skytrade import Pyre
+from pyreframework import Pyre
 
 app = Pyre()
 

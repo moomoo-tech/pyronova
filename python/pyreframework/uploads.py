@@ -2,7 +2,7 @@
 
 Usage::
 
-    from skytrade.uploads import parse_multipart
+    from pyreframework.uploads import parse_multipart
 
     @app.post("/upload")
     def upload(req):

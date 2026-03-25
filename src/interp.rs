@@ -17,7 +17,7 @@ use pyo3::prelude::*;
 // ---------------------------------------------------------------------------
 
 // Per-pool configuration (replaces former global statics).
-// These are set on SkyApp before run() and propagated to InterpreterPool.
+// These are set on PyreApp before run() and propagated to InterpreterPool.
 use std::sync::atomic::AtomicBool;
 
 /// Per-worker state accessible from C-FFI functions (no closure environment).
@@ -347,9 +347,9 @@ struct SubInterpreterWorker {
     globals: *mut ffi::PyObject,
     /// Cached: json.dumps function pointer (avoids per-request import)
     json_dumps_func: *mut ffi::PyObject,
-    /// Cached: _SkyRequest class pointer
+    /// Cached: _PyreRequest class pointer
     sky_request_cls: *mut ffi::PyObject,
-    /// Cached: _SkyResponse class pointer
+    /// Cached: _PyreResponse class pointer
     sky_response_cls: *mut ffi::PyObject,
     /// Cached: persistent asyncio event loop for this sub-interpreter
     _asyncio_loop: *mut ffi::PyObject,
@@ -387,7 +387,7 @@ impl SubInterpreterWorker {
 
         // We are now in the sub-interpreter's thread state.
         // Run the bootstrap (from external .py file) + user script.
-        let bootstrap_src = include_str!("../python/skytrade/_bootstrap.py");
+        let bootstrap_src = include_str!("../python/pyreframework/_bootstrap.py");
         let bootstrap = format!("{bootstrap_src}\n# Execute full user script\n{script}");
 
         let globals =
@@ -433,13 +433,13 @@ impl SubInterpreterWorker {
         }
 
         // Cache frequently-used Python objects to avoid per-request lookups
-        let req_cls_name = std::ffi::CString::new("_SkyRequest").unwrap();
+        let req_cls_name = std::ffi::CString::new("_PyreRequest").unwrap();
         let sky_request_cls = ffi::PyDict_GetItemString(globals.as_ptr(), req_cls_name.as_ptr());
         if !sky_request_cls.is_null() {
             ffi::Py_INCREF(sky_request_cls);
         }
 
-        let resp_cls_name = std::ffi::CString::new("_SkyResponse").unwrap();
+        let resp_cls_name = std::ffi::CString::new("_PyreResponse").unwrap();
         let sky_response_cls = ffi::PyDict_GetItemString(globals.as_ptr(), resp_cls_name.as_ptr());
         if !sky_response_cls.is_null() {
             ffi::Py_INCREF(sky_response_cls);
@@ -517,7 +517,7 @@ impl SubInterpreterWorker {
         })
     }
 
-    /// Build a _SkyRequest Python object in this sub-interpreter.
+    /// Build a _PyreRequest Python object in this sub-interpreter.
     ///
     /// # Safety
     /// Must be called with this sub-interpreter's GIL held.
@@ -547,10 +547,10 @@ impl SubInterpreterWorker {
         ffi::PyTuple_SetItem(args.as_ptr(), 4, py_body.into_raw());
         ffi::PyTuple_SetItem(args.as_ptr(), 5, py_headers.into_raw());
 
-        // Use cached _SkyRequest class
+        // Use cached _PyreRequest class
         let req_cls = self.sky_request_cls;
         if req_cls.is_null() {
-            return Err("_SkyRequest class not found".to_string());
+            return Err("_PyreRequest class not found".to_string());
         }
 
         let request_obj = PyObjRef::from_owned(ffi::PyObject_Call(
@@ -562,7 +562,7 @@ impl SubInterpreterWorker {
 
         request_obj.ok_or_else(|| {
             ffi::PyErr_Print();
-            "failed to create _SkyRequest object".to_string()
+            "failed to create _PyreRequest object".to_string()
         })
     }
 
@@ -573,7 +573,7 @@ impl SubInterpreterWorker {
     unsafe fn parse_result(&self, result_obj: PyObjRef) -> Result<SubInterpResponse, String> {
         let ptr = result_obj.as_ptr();
 
-        // Check if it's a _SkyResponse or any response-like object
+        // Check if it's a _PyreResponse or any response-like object
         // (duck typing: has status_code + body attributes)
         let resp_cls = self.sky_response_cls;
         let is_response = if !resp_cls.is_null() && ffi::PyObject_IsInstance(ptr, resp_cls) == 1 {
@@ -624,13 +624,13 @@ impl SubInterpreterWorker {
         })
     }
 
-    /// Build a _SkyResponse Python object from a SubInterpResponse.
+    /// Build a _PyreResponse Python object from a SubInterpResponse.
     unsafe fn build_sky_response(&self, resp: &SubInterpResponse) -> Result<PyObjRef, String> {
         if self.sky_response_cls.is_null() {
-            return Err("_SkyResponse class not available".to_string());
+            return Err("_PyreResponse class not available".to_string());
         }
 
-        // Convert body Vec<u8> to Python str (for _SkyResponse)
+        // Convert body Vec<u8> to Python str (for _PyreResponse)
         let body_str = String::from_utf8_lossy(&resp.body);
         let py_body = py_str(&body_str).ok_or("failed to create body str")?;
         let py_status = PyObjRef::from_owned(ffi::PyLong_FromLong(resp.status as i64))
@@ -641,7 +641,7 @@ impl SubInterpreterWorker {
         };
         let py_headers = py_str_dict(&resp.headers).ok_or("failed to create headers dict")?;
 
-        // _SkyResponse(body, status_code, content_type, headers)
+        // _PyreResponse(body, status_code, content_type, headers)
         let args = PyObjRef::from_owned(ffi::PyTuple_New(0)).ok_or("failed to create args")?;
         let kwargs = PyObjRef::from_owned(ffi::PyDict_New()).ok_or("failed to create kwargs")?;
 
@@ -657,7 +657,7 @@ impl SubInterpreterWorker {
         ))
         .ok_or_else(|| {
             ffi::PyErr_Print();
-            "failed to create _SkyResponse".to_string()
+            "failed to create _PyreResponse".to_string()
         })
     }
 
@@ -721,7 +721,7 @@ impl SubInterpreterWorker {
         }
     }
 
-    /// Parse a _SkyResponse Python object.
+    /// Parse a _PyreResponse Python object.
     unsafe fn parse_sky_response(&self, obj: PyObjRef) -> Result<SubInterpResponse, String> {
         let ptr = obj.as_ptr();
 
@@ -913,7 +913,7 @@ impl SubInterpreterWorker {
 
             for hook_name in after_hook_names {
                 if let Some(&hook_func) = self.handlers.get(hook_name) {
-                    // Build _SkyResponse from current response
+                    // Build _PyreResponse from current response
                     let resp_obj = self.build_sky_response(&response)?;
 
                     let hook_args = PyObjRef::from_owned(ffi::PyTuple_New(2))
@@ -1241,7 +1241,7 @@ fn worker_thread_loop_async(
         .join(", ");
 
     // Load async engine from external Python file (syntax highlighting + maintainability)
-    let engine_template = include_str!("../python/skytrade/_async_engine.py");
+    let engine_template = include_str!("../python/pyreframework/_async_engine.py");
     let engine_script =
         format!("WORKER_ID = {worker_idx}\nHANDLER_NAMES = [{handlers_array}]\n{engine_template}");
 

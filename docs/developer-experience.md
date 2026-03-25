@@ -48,7 +48,7 @@ app.run()                   # 自动检测，自动分流，零配置
 | 调用外部 API (httpx) | `async def handler(req)` + `await` |
 | numpy / pandas 计算 | `def handler(req)` + `gil=True` |
 | AI Agent (LLM 调用) | `async def handler(req)` + `await` |
-| SSE 流式输出 | `def handler(req)` + `gil=True` + `SkyStream` |
+| SSE 流式输出 | `def handler(req)` + `gil=True` + `PyreStream` |
 | 混合场景 | 直接混写，框架自动分流 |
 
 ### 性能保证
@@ -191,7 +191,7 @@ def add(data):
 ### 客户端
 
 ```python
-from skytrade import PyreRPCClient
+from pyreframework import PyreRPCClient
 
 with PyreRPCClient("http://127.0.0.1:8000") as client:
     result = client.add(a=3, b=5)  # 像本地函数一样调用
@@ -234,11 +234,11 @@ msg_type, data = ws.recv_message()  # ("text", "hello") or ("binary", b"\x00")
 
 ```python
 import threading
-from skytrade import SkyStream
+from pyreframework import PyreStream
 
 @app.get("/stream", gil=True)
 def stream(req):
-    s = SkyStream()
+    s = PyreStream()
     def generate():
         for token in ["Hello", " ", "World"]:
             s.send_event(token)
@@ -270,7 +270,7 @@ del app.state["key"]
 # 启用 (环境变量)
 # PYRE_METRICS=1 python app.py
 
-from skytrade import get_gil_metrics
+from pyreframework import get_gil_metrics
 last, peak, probes, total, rss, queue, hold, dropped, total_req = get_gil_metrics()
 ```
 

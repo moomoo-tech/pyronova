@@ -1,5 +1,5 @@
 """WebSocket binary test server."""
-from skytrade import Pyre
+from pyreframework import Pyre
 
 app = Pyre()
 

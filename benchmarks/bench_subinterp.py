@@ -1,8 +1,8 @@
 """Benchmark: sub-interpreter mode with headers + query_params."""
 
-from skytrade import SkyApp
+from pyreframework import PyreApp
 
-app = SkyApp()
+app = PyreApp()
 
 
 def index(req):

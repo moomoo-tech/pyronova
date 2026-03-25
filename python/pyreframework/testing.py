@@ -2,8 +2,8 @@
 
 Usage::
 
-    from skytrade import Pyre
-    from skytrade.testing import TestClient
+    from pyreframework import Pyre
+    from pyreframework.testing import TestClient
 
     app = Pyre()
 

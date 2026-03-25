@@ -9,7 +9,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAnyMethods, PyDict, PyList, PyString};
 
 use crate::json::py_to_json_value;
-use crate::types::{ResponseData, SkyResponse};
+use crate::types::{ResponseData, PyreResponse};
 
 // ---------------------------------------------------------------------------
 // Extract handler return value → ResponseData
@@ -19,8 +19,8 @@ pub(crate) fn extract_response_data(
     py: Python<'_>,
     obj: Bound<'_, pyo3::PyAny>,
 ) -> Result<ResponseData, String> {
-    // SkyResponse
-    if let Ok(resp) = obj.cast::<SkyResponse>() {
+    // PyreResponse
+    if let Ok(resp) = obj.cast::<PyreResponse>() {
         let resp = resp.get();
         let body_bound = resp.body.bind(py);
 

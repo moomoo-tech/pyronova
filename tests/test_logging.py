@@ -57,7 +57,7 @@ def run_server_and_check(script: str, label: str, expected_strings: list[str]):
 def test_gil_mode_logging():
     """Framework logging in GIL mode with timestamps."""
     script = '''
-from skytrade import Pyre
+from pyreframework import Pyre
 app = Pyre()
 app.enable_logging()
 
@@ -76,7 +76,7 @@ app.run(host="127.0.0.1", port=9876)
 def test_subinterp_rust_logging():
     """Rust-level request logging in sub-interpreter mode."""
     script = '''
-from skytrade import Pyre
+from pyreframework import Pyre
 app = Pyre()
 app.enable_logging()
 
@@ -95,7 +95,7 @@ app.run(host="127.0.0.1", port=9876, mode="subinterp")
 def test_user_print_in_subinterp():
     """User print() works in sub-interpreter handlers."""
     script = '''
-from skytrade import Pyre
+from pyreframework import Pyre
 app = Pyre()
 
 @app.get("/")
@@ -117,7 +117,7 @@ import logging
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger("test")
 
-from skytrade import Pyre
+from pyreframework import Pyre
 app = Pyre()
 
 @app.get("/")

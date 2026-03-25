@@ -1,6 +1,6 @@
 """Bootstrap script injected into each sub-interpreter worker.
 
-Provides mock skytrade modules so user scripts can be executed in isolated
+Provides mock pyreframework modules so user scripts can be executed in isolated
 sub-interpreters without importing the real Rust extension (which doesn't
 support PEP 684 multi-interpreter loading).
 
@@ -12,7 +12,7 @@ succeed but does NOT perform real validation.
 
 # -- Request / Response stubs ------------------------------------------------
 
-class _SkyRequest:
+class _PyreRequest:
     def __init__(self, method, path, params, query, body_bytes, headers):
         self.method = method
         self.path = path
@@ -33,20 +33,20 @@ class _SkyRequest:
         import json
         return json.loads(self.text())
 
-class _SkyResponse:
+class _PyreResponse:
     def __init__(self, body="", status_code=200, content_type=None, headers=None):
         self.body = body
         self.status_code = status_code
         self.content_type = content_type
         self.headers = headers or {}
 
-# -- Mock skytrade modules ----------------------------------------------------
+# -- Mock pyreframework modules ----------------------------------------------------
 
 import sys, types, os
 os.environ["PYRE_WORKER"] = "1"
 
-_mock_engine = types.ModuleType("skytrade.engine")
-_mock_engine.SkyApp = type("SkyApp", (), {
+_mock_engine = types.ModuleType("pyreframework.engine")
+_mock_engine.PyreApp = type("PyreApp", (), {
     "__init__": lambda self: None,
     "get": lambda self, *a, **kw: (lambda f: f) if len(a) < 2 else None,
     "post": lambda self, *a, **kw: (lambda f: f) if len(a) < 2 else None,
@@ -60,25 +60,25 @@ _mock_engine.SkyApp = type("SkyApp", (), {
     "static_dir": lambda self, *a: None,
     "run": lambda self, **kw: None,
 })
-_mock_engine.SkyRequest = _SkyRequest
-_mock_engine.SkyResponse = _SkyResponse
-_mock_engine.SkyWebSocket = type("SkyWebSocket", (), {})
+_mock_engine.PyreRequest = _PyreRequest
+_mock_engine.PyreResponse = _PyreResponse
+_mock_engine.PyreWebSocket = type("PyreWebSocket", (), {})
 _mock_engine.SharedState = type("SharedState", (), {})
-_mock_engine.SkyStream = type("SkyStream", (), {})
+_mock_engine.PyreStream = type("PyreStream", (), {})
 _mock_engine.get_gil_metrics = lambda: (0,0,0,0,0,0,0,0,0)
 
-_mock_skytrade = types.ModuleType("skytrade")
-_mock_skytrade.engine = _mock_engine
-_mock_skytrade.SkyApp = _mock_engine.SkyApp
-_mock_skytrade.SkyRequest = _SkyRequest
-_mock_skytrade.SkyResponse = _SkyResponse
-_mock_skytrade.SkyWebSocket = _mock_engine.SkyWebSocket
-_mock_skytrade.SharedState = _mock_engine.SharedState
-_mock_skytrade.SkyStream = _mock_engine.SkyStream
-_mock_skytrade.get_gil_metrics = _mock_engine.get_gil_metrics
+_mock_pyreframework = types.ModuleType("pyreframework")
+_mock_pyreframework.engine = _mock_engine
+_mock_pyreframework.PyreApp = _mock_engine.PyreApp
+_mock_pyreframework.PyreRequest = _PyreRequest
+_mock_pyreframework.PyreResponse = _PyreResponse
+_mock_pyreframework.PyreWebSocket = _mock_engine.PyreWebSocket
+_mock_pyreframework.SharedState = _mock_engine.SharedState
+_mock_pyreframework.PyreStream = _mock_engine.PyreStream
+_mock_pyreframework.get_gil_metrics = _mock_engine.get_gil_metrics
 def _redirect(url, status_code=302):
-    return _SkyResponse(body="", status_code=status_code, headers={"location": url})
-_mock_skytrade.redirect = _redirect
+    return _PyreResponse(body="", status_code=status_code, headers={"location": url})
+_mock_pyreframework.redirect = _redirect
 
 # Pyre wrapper (no-op in worker mode)
 class _MockPyre:
@@ -122,20 +122,20 @@ class _MockPyre:
     def mcp(self):
         return type("MCP", (), {"tool": lambda s, *a, **kw: (lambda f: f), "resource": lambda s, *a, **kw: (lambda f: f), "prompt": lambda s, *a, **kw: (lambda f: f)})()
 
-_mock_skytrade.Pyre = _MockPyre
+_mock_pyreframework.Pyre = _MockPyre
 
 # App module mock
-_mock_app = types.ModuleType("skytrade.app")
+_mock_app = types.ModuleType("pyreframework.app")
 _mock_app.Pyre = _MockPyre
 
-sys.modules["skytrade"] = _mock_skytrade
-sys.modules["skytrade.engine"] = _mock_engine
-sys.modules["skytrade.app"] = _mock_app
-sys.modules["skytrade.mcp"] = types.ModuleType("skytrade.mcp")
+sys.modules["pyreframework"] = _mock_pyreframework
+sys.modules["pyreframework.engine"] = _mock_engine
+sys.modules["pyreframework.app"] = _mock_app
+sys.modules["pyreframework.mcp"] = types.ModuleType("pyreframework.mcp")
 
 # -- Cookie utilities (pure Python) -------------------------------------------
 
-_cookies_mod = types.ModuleType("skytrade.cookies")
+_cookies_mod = types.ModuleType("pyreframework.cookies")
 def _get_cookies(req):
     h = req.headers.get("cookie", "") if hasattr(req, "headers") else ""
     if not h: return {}
@@ -157,16 +157,16 @@ def _set_cookie(resp, name, value, **kw):
     if kw.get("samesite", "Lax"): parts.append(f"SameSite={kw.get('samesite','Lax')}")
     hdrs = dict(getattr(resp, "headers", {}) or {})
     hdrs["set-cookie"] = "; ".join(parts)
-    return _SkyResponse(body=resp.body, status_code=getattr(resp,"status_code",200), content_type=getattr(resp,"content_type",None), headers=hdrs)
+    return _PyreResponse(body=resp.body, status_code=getattr(resp,"status_code",200), content_type=getattr(resp,"content_type",None), headers=hdrs)
 def _delete_cookie(resp, name, **kw):
     return _set_cookie(resp, name, "", max_age=0, path=kw.get("path","/"))
 _cookies_mod.get_cookies = _get_cookies
 _cookies_mod.get_cookie = _get_cookie
 _cookies_mod.set_cookie = _set_cookie
 _cookies_mod.delete_cookie = _delete_cookie
-sys.modules["skytrade.cookies"] = _cookies_mod
-sys.modules["skytrade.rpc"] = types.ModuleType("skytrade.rpc")
-sys.modules["skytrade.testing"] = types.ModuleType("skytrade.testing")
+sys.modules["pyreframework.cookies"] = _cookies_mod
+sys.modules["pyreframework.rpc"] = types.ModuleType("pyreframework.rpc")
+sys.modules["pyreframework.testing"] = types.ModuleType("pyreframework.testing")
 
 # -- Pydantic stub (WARNING: replaces real pydantic in sub-interpreters) ------
 # Pydantic V2's pydantic-core is a Rust/PyO3 extension that cannot load in
@@ -197,7 +197,7 @@ for _pm in ("pydantic.fields", "pydantic.main", "pydantic._migration",
 
 # -- Upload utilities (pure Python) -------------------------------------------
 
-_uploads_mod = types.ModuleType("skytrade.uploads")
+_uploads_mod = types.ModuleType("pyreframework.uploads")
 class _UploadFile:
     def __init__(self, name, filename, content_type, data):
         self.name = name
@@ -244,4 +244,4 @@ def _parse_multipart(req):
     return result
 _uploads_mod.parse_multipart = _parse_multipart
 _uploads_mod.UploadFile = _UploadFile
-sys.modules["skytrade.uploads"] = _uploads_mod
+sys.modules["pyreframework.uploads"] = _uploads_mod

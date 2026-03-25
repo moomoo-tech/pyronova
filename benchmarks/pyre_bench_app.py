@@ -1,6 +1,6 @@
 """Pyre benchmark app — sub-interpreter safe stack (msgspec + stdlib json)."""
 
-from skytrade import Pyre
+from pyreframework import Pyre
 import json
 
 app = Pyre()

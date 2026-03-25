@@ -1,8 +1,8 @@
 """Pyre GIL mode benchmark server."""
-from skytrade import SkyApp
+from pyreframework import PyreApp
 import json
 
-app = SkyApp()
+app = PyreApp()
 
 def t1_hello(req):
     return "Hello"

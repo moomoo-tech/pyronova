@@ -2,7 +2,7 @@
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from skytrade import Pyre
+from pyreframework import Pyre
 from multifile_app.routes import hello, compute
 
 app = Pyre()

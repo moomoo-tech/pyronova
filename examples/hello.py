@@ -1,6 +1,6 @@
 """Pyre example — decorator syntax, middleware, custom responses, static files."""
 
-from skytrade import Pyre, SkyResponse
+from pyreframework import Pyre, PyreResponse
 
 app = Pyre()
 
@@ -18,7 +18,7 @@ app.enable_logging()
 @app.after_request
 def add_cors(req, resp):
     """Add CORS headers to every response."""
-    return SkyResponse(
+    return PyreResponse(
         body=resp.body,
         status_code=resp.status_code,
         content_type=resp.content_type,
@@ -57,7 +57,7 @@ def search(req):
 @app.get("/html")
 def html_page(req):
     """Custom content-type."""
-    return SkyResponse(
+    return PyreResponse(
         body="<h1>Hello from Pyre</h1>",
         content_type="text/html; charset=utf-8",
     )
@@ -66,7 +66,7 @@ def html_page(req):
 @app.fallback
 def not_found(req):
     """Custom 404 handler."""
-    return SkyResponse(
+    return PyreResponse(
         body={"error": "not found", "path": req.path},
         status_code=404,
         content_type="application/json",

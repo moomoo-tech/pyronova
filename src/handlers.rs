@@ -15,8 +15,8 @@ use crate::response::{
 };
 use crate::router::FrozenRoutes;
 use crate::static_fs::try_static_file;
-use crate::stream::SkyStream;
-use crate::types::{extract_headers, ResponseData, SkyRequest, SkyResponse};
+use crate::stream::PyreStream;
+use crate::types::{extract_headers, ResponseData, PyreRequest, PyreResponse};
 
 type SharedPool = Arc<interp::InterpreterPool>;
 
@@ -119,7 +119,7 @@ pub(crate) async fn handle_request(
         None => return Ok(full_body(not_found_response())),
     };
 
-    let sky_req = SkyRequest {
+    let sky_req = PyreRequest {
         method,
         path,
         params,
@@ -149,7 +149,7 @@ pub(crate) async fn handle_request(
 fn call_handler_with_hooks(
     routes: FrozenRoutes,
     handler_idx: usize,
-    sky_req: SkyRequest,
+    sky_req: PyreRequest,
 ) -> HandlerResult {
     use std::sync::atomic::Ordering::Relaxed;
 
@@ -199,17 +199,17 @@ fn call_handler_with_hooks(
                     Err(e) => return HandlerResult::Response(Err(e)),
                 };
 
-                // Check if handler returned a SkyStream (SSE)
+                // Check if handler returned a PyreStream (SSE)
                 let type_name = obj
                     .bind(py)
                     .get_type()
                     .name()
                     .map(|n| n.to_string())
                     .unwrap_or_default();
-                if type_name == "SkyStream" {
-                    // Downcast to SkyStream and wire up the channel
+                if type_name == "PyreStream" {
+                    // Downcast to PyreStream and wire up the channel
                     let bound = obj.bind(py);
-                    let stream_ref = match bound.cast::<SkyStream>() {
+                    let stream_ref = match bound.cast::<PyreStream>() {
                         Ok(s) => s.get(),
                         Err(e) => return HandlerResult::Response(Err(e.to_string())),
                     };
@@ -217,7 +217,7 @@ fn call_handler_with_hooks(
                         Some(r) => r,
                         None => {
                             return HandlerResult::Response(Err(
-                                "SkyStream already consumed".to_string()
+                                "PyreStream already consumed".to_string()
                             ))
                         }
                     };
@@ -246,14 +246,14 @@ fn call_handler_with_hooks(
                         };
                         let current_resp = Py::new(
                             py,
-                            SkyResponse {
+                            PyreResponse {
                                 body: body_py,
                                 status_code: resp_data.status,
                                 content_type: Some(resp_data.content_type.clone()),
                                 headers: resp_data.headers.clone(),
                             },
                         )
-                        .map_err(|e| format!("failed to create SkyResponse: {e}"))?;
+                        .map_err(|e| format!("failed to create PyreResponse: {e}"))?;
                         match hook.call1(py, (sky_req.clone(), current_resp)) {
                             Ok(result) => {
                                 let bound = result.bind(py);
@@ -342,7 +342,7 @@ pub(crate) async fn handle_request_subinterp(
     let is_gil_route = pool.requires_gil.get(handler_idx).copied().unwrap_or(false);
 
     if is_gil_route {
-        let sky_req = SkyRequest {
+        let sky_req = PyreRequest {
             method,
             path,
             params,

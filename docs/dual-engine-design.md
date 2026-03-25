@@ -7,8 +7,8 @@
 一套业务代码，两套底层引擎，通过 Cargo feature flags 编译期切换：
 
 ```
-pip install skytrade          → Tokio (macOS/Linux/Windows，生态拉满)
-pip install skytrade[uring]   → Monoio (Linux only，极致性能)
+pip install pyreframework          → Tokio (macOS/Linux/Windows，生态拉满)
+pip install pyreframework[uring]   → Monoio (Linux only，极致性能)
 ```
 
 ## 两条路线对比
@@ -68,7 +68,7 @@ pub fn dispatch_to_interpreter(arena_ptr: usize) { /* ... */ }
 | 2 | 抽象 I/O trait 层 | 设计统一接口 |
 | 3 | Monoio 引擎 PoC | Linux 机器 |
 | 4 | Feature flag 切换 | 两个引擎都验证 |
-| 5 | `pip install skytrade[uring]` | CI/CD 支持 |
+| 5 | `pip install pyreframework[uring]` | CI/CD 支持 |
 
 ## 当前决策
 

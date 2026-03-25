@@ -1,7 +1,7 @@
 """Test: Phase 7.2 async bridge — sleep(1ms) should break the 8k ceiling."""
-from skytrade import SkyApp
+from pyreframework import PyreApp
 
-app = SkyApp()
+app = PyreApp()
 
 
 def hello(req):
