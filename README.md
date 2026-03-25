@@ -22,24 +22,6 @@ async def io_heavy(req):
 app.run()
 ```
 
-## Performance
-
-Benchmarked on Apple Silicon (M-series), Python 3.14, wrk -t4 -c256 -d10s.
-
-| Scenario | Pyre | FastAPI | Robyn | Pyre vs FastAPI |
-|----------|------|---------|-------|----------------|
-| Hello World | **220,000** | 15,000 | 87,000 | **14.7x** |
-| JSON response | **220,000** | 12,000 | 86,000 | **18.3x** |
-| I/O (sleep 1ms) | **133,000** | 50,000 | 93,000 | **2.7x** |
-| CPU (fib 10) | **212,000** | 8,000 | 81,000 | **26.5x** |
-| JSON parse 7KB | **99,000** | 6,000 | 57,000 | **16.5x** |
-
-| Resource | Pyre | FastAPI | Robyn |
-|----------|------|---------|-------|
-| Memory (10 workers) | **119 MB** | ~200 MB | 447 MB |
-| P99 latency | **4.2 ms** | ~20 ms | 262 ms |
-| Processes | **1** | 1+ Gunicorn | 22 |
-
 ## Why Pyre?
 
 ### The problem
@@ -73,6 +55,24 @@ This matters for AI:
 - **Agent orchestration** — multiple agents computing simultaneously. Each sub-interpreter runs at full CPU speed without blocking others.
 - **Memory efficiency** — deploy 3x more instances on the same hardware. On a 512 MB container, Pyre runs 10 parallel workers where Robyn can barely fit 2 processes.
 - **State sharing** — cross-worker `app.state` with nanosecond latency. No Redis, no serialization, no network hop. Session management, caching, and coordination built into the framework.
+
+## Performance
+
+Benchmarked on Apple Silicon (M-series), Python 3.14, wrk -t4 -c256 -d10s.
+
+| Scenario | Pyre | FastAPI | Robyn | Pyre vs FastAPI |
+|----------|------|---------|-------|----------------|
+| Hello World | **220,000** | 15,000 | 87,000 | **14.7x** |
+| JSON response | **220,000** | 12,000 | 86,000 | **18.3x** |
+| I/O (sleep 1ms) | **133,000** | 50,000 | 93,000 | **2.7x** |
+| CPU (fib 10) | **212,000** | 8,000 | 81,000 | **26.5x** |
+| JSON parse 7KB | **99,000** | 6,000 | 57,000 | **16.5x** |
+
+| Resource | Pyre | FastAPI | Robyn |
+|----------|------|---------|-------|
+| Memory (10 workers) | **119 MB** | ~200 MB | 447 MB |
+| P99 latency | **4.2 ms** | ~20 ms | 262 ms |
+| Processes | **1** | 1+ Gunicorn | 22 |
 
 ## How Pyre works
 
