@@ -210,49 +210,32 @@ Python handler thread → SkyStream.send_event()
 - `BoxBody` 统一响应类型（`Either<Full, StreamBody>`）
 - SSE 格式：`event: xxx\ndata: xxx\n\n`
 
+### 已完成
+- [x] MCP Server 装饰器（`@app.mcp.tool()`、`@app.mcp.resource()`、`@app.mcp.prompt()`）
+- [x] WebSocket 二进制消息支持
+- [x] AST 过滤替换为环境变量方案 (`PYRE_WORKER=1`)
+- [x] Pydantic 自动绑定 (`model=` 参数)
+
 ### 待完成
-- [ ] HTTP/2（deps 里已有 hyper http2 feature）
+- [ ] HTTP/2 full duplex（deps 里已有 hyper http2 feature）
 - [ ] io_uring backend (Linux, monoio)
 - [ ] HTTP/3 QUIC
-- [ ] Native gRPC (tonic crate, Robyn 不支持)
-- [ ] MCP Server 装饰器（`@app.mcp.tool()`）
-- [ ] WebSocket 二进制消息支持
-- [ ] AST 过滤替换为环境变量方案
-- [ ] Pydantic 自动绑定
+- [ ] Native gRPC (tonic crate)
 
-## Phase 7 — Async Handler (下一个)
+## Phase 7 — Async Handler (DONE ✓) — 2026-03-24
 
-Pyre 唯一落后 Robyn 的场景：I/O 并发（sleep 1ms: 7.9k vs 78k, 10x 差距）。
-原因：sync handler 阻塞 worker 线程，async handler 可在等待 I/O 时释放线程。
-
-### 为什么不做多进程 numpy
-
-详见 `docs/why-not-multiprocess.md`。核心结论：
-- 多进程摧毁 Pyre 单进程内存优势（67MB vs 451MB）
-- 99% Web 请求是 I/O，不是 CPU
-- numpy 的 PEP 684 适配是 numpy 的问题，不是 Pyre 的
-- 金融计算应在后台进程，Web 层只负责 I/O
-- 推荐 Polars 替代 Pandas（释放 GIL，不阻塞 Pyre）
-
-### Phase 7.1: 基础 async handler (DONE ✓) — 2026-03-24
+### Phase 7.1: 基础 async handler (DONE ✓)
 
 - [x] 检测 handler 返回 coroutine (`PyCoro_CheckExact`)
 - [x] GIL 模式：`asyncio.run(coro)` in `spawn_blocking`
 - [x] SubInterp 模式：每个 worker 维护独立 asyncio event loop，`loop.run_until_complete(coro)`
 - [x] `async def` handler 功能完全可用（两种模式）
-- 当前性能：8k req/s（每 worker 串行执行协程）
 
-### Phase 7.2: 异步多路复用 (TODO)
+### Phase 7.2: Native Async Bridge (DONE ✓)
 
-每个 sub-interpreter worker 内嵌 `tokio::runtime::current_thread` + `LocalSet`，
-用 `spawn_local` 并发跑多个协程。10 个 worker 各自同时处理数百个 await 中的请求。
-
-目标：
-```
-sleep(1ms) I/O:  8k → 70k+    (追平 Robyn)
-asyncpg/aiohttp: 可用          (Python async 生态兼容)
-内存:            保持 67MB      (不引入多进程)
-```
+- [x] C-FFI bridge (`pyre_recv`/`pyre_send`) 释放 GIL 在 channel wait 期间
+- [x] Dual worker pool: sync workers + async workers 自动检测分配
+- [x] 133k req/s on I/O-bound (sleep 1ms) — 超越 Robyn 92k
 
 ## Phase 8 — 跨子解释器状态共享 (DONE ✓) — 2026-03-24
 
@@ -349,11 +332,54 @@ def hit_counter(req):
 - 拓展 1：`moka` Cache — 带 TTL 过期（Session 自动清理）
 - 拓展 2：`app.state.set_bytes()` 共享二进制数据（行情 Tensor）
 
+## Phase 9 — Production Hardening (DONE ✓) — v1.2.0, 2026-03-25
+
+### 代码质量
+- [x] Bootstrap 脚本从 Rust 字符串抽离到 `_bootstrap.py` (via `include_str!`)
+- [x] 删除 `filter_script_ast` 死代码
+- [x] CORS/logging 从全局静态变量迁移到 `SkyApp` 实例字段
+- [x] `PyObjRef::Drop` 加 `debug_assert!(PyGILState_Check())` GIL 安全断言
+- [x] `InterpreterPool::Drop` join worker threads (修复 Ctrl+C segfault)
+- [x] `cargo fmt` 全量格式化 + `cargo clippy` 32 个 warning 清零
+- [x] PyO3 `downcast` → `cast` 迁移 (14 处)
+- [x] 热更新改用 `watchfiles` (OS 原生事件) + 降级轮询跳过 `.venv`/`node_modules`
+
+### 测试
+- [x] 21 Rust 单元测试 (response builders, MIME, headers, query params)
+- [x] 54 Python pytest 测试 (MCP, cookies, TestClient, RPC, static files, WebSocket, async, logging)
+- [x] 22 集成测试 (GIL + sub-interp 全功能端到端)
+- [x] 5 分钟稳定性压测: 64M 请求, 零内存泄漏, 零崩溃
+
+### CI/CD
+- [x] GitHub Actions: cargo test → pytest → integration (Python 3.13/3.14)
+- [x] Blocking `cargo fmt --check` + `cargo clippy -- -D warnings`
+- [x] PyPI release workflow: v* tag → 4 平台 wheels → 自动发布
+- [x] `/test` Claude Code 命令
+
+## Phase 10 — Next (规划中)
+
+### 短期
+- [ ] HTTP/2 full duplex
+- [ ] OpenTelemetry tracing 集成
+- [ ] Rate limiting middleware
+- [ ] Dependency injection (轻量级, 基于 `before_request`)
+
+### 中期
+- [ ] io_uring backend (Linux, monoio)
+- [ ] Native gRPC (tonic crate)
+- [ ] Connection pooling for upstream services
+- [ ] PyO3 上游 sub-interpreter 支持 (tracking: PyO3#3451)
+
+### 长期
+- [ ] HTTP/3 QUIC
+- [ ] Free-threaded Python (PEP 703) dual-mode support
+- [ ] Cluster mode (multi-process + shared state via shared memory)
+- [ ] Robyn/Flask/FastAPI 迁移兼容层
+
 ## 长期愿景
 - 成为第一个同时支持 free-threaded 和 per-interpreter GIL 的 Python web 框架
 - 在交易系统场景中实现微秒级 WebSocket + Orderbook 处理
-- 提供 Robyn/Flask/FastAPI 的迁移兼容层
-- I/O + CPU + 内存 三杀 Robyn
+- I/O + CPU + 内存 三杀所有 Python web 框架
 
 ---
 
@@ -365,8 +391,6 @@ def hit_counter(req):
 | 2026-03-23 | v0.2.0 | 216k | 100k | 76k | Phase 2+4: 子解释器，2.8x Robyn |
 | 2026-03-24 | v0.3.0 | 213k | 100k | 76k | Phase 3: DX 功能补全，零回归 |
 | 2026-03-24 | v0.3.1 | 215k | 104k | 83k | Phase 5.1: RAII + channel pool + 模块化拆分 + 安全修复 |
-| 2026-03-24 | v0.4.0 | 215k | 104k | 83k | Phase 6: Native WebSocket + Hybrid GIL + 全面压测(54场景) |
-| 2026-03-24 | v0.4.0+ | 217k | 78k(47k IO) | 81k | spawn_blocking + 背压 + TCP_NODELAY, GIL IO +535%, 胜10/14场景 |
-| 2026-03-24 | v0.5.0 | — | 74k state | — | Phase 7 async + Phase 8 SharedState + DX (.pyi, async detect) |
-| 2026-03-24 | v0.5.0+ | — | — | — | Phase 6: SSE streaming (SkyStream) for AI Agent token output |
-| 2026-03-24 | v0.5.0 | 217k/67MB | 53k/GIL=0μs | 81k/~440MB | GIL Watchdog + 内存监控, SubInterp GIL=0μs 验证, 内存 6.6x 优势 |
+| 2026-03-24 | v0.4.0 | 215k | 104k | 83k | Phase 6: Native WebSocket + Hybrid GIL |
+| 2026-03-24 | v0.5.0 | 217k/67MB | 74k state | 81k/~440MB | Phase 7+8: async bridge + SharedState + SSE |
+| **2026-03-25** | **v1.2.0** | **215k/752KB** | — | — | **Phase 9: 64M req stability, 97 tests, zero clippy warnings** |
