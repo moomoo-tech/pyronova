@@ -428,10 +428,8 @@ class Pyre:
         self._engine.run(host=host, port=port, workers=workers, mode=mode)
 
     def _run_with_reload(self):
-        """Watch .py files and restart server on changes."""
+        """Watch .py files and restart server on changes using OS-native events."""
         import subprocess
-        import hashlib
-        import glob
 
         script = sys.argv[0] if sys.argv else None
         if not script:
@@ -439,19 +437,62 @@ class Pyre:
             return
 
         watch_dir = os.path.dirname(os.path.abspath(script)) or "."
-        print(f"  [reload] Watching {watch_dir} for .py changes...")
 
-        def _file_hash(path):
+        try:
+            import watchfiles
+        except ImportError:
+            print("  [reload] Install 'watchfiles' for efficient file watching:")
+            print("           pip install watchfiles")
+            print("  [reload] Falling back to polling mode...")
+            return self._run_with_reload_poll(watch_dir, script)
+
+        print(f"  [reload] Watching {watch_dir} for .py changes (watchfiles)...")
+
+        while True:
+            env = {**os.environ, "_PYRE_RELOAD_CHILD": "1"}
+            proc = subprocess.Popen([sys.executable, script], env=env)
+
             try:
-                with open(path, "rb") as f:
-                    return hashlib.md5(f.read()).hexdigest()
-            except Exception:
-                return ""
+                for changes in watchfiles.watch(
+                    watch_dir,
+                    watch_filter=watchfiles.PythonFilter(),
+                    stop_event=None,
+                ):
+                    changed = [os.path.basename(c[1]) for c in list(changes)[:3]]
+                    print(f"\n  [reload] File changed: {', '.join(changed)}")
+                    print(f"  [reload] Restarting...\n")
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                    break
+                else:
+                    break
+            except KeyboardInterrupt:
+                proc.terminate()
+                proc.wait()
+                break
+
+    def _run_with_reload_poll(self, watch_dir: str, script: str):
+        """Fallback polling watcher when watchfiles is not installed."""
+        import subprocess
+        import hashlib
+        import glob
+
+        print(f"  [reload] Watching {watch_dir} for .py changes (polling)...")
 
         def _snapshot():
             files = {}
             for f in glob.glob(os.path.join(watch_dir, "**/*.py"), recursive=True):
-                files[f] = _file_hash(f)
+                # Skip common large directories
+                if "/.venv/" in f or "/node_modules/" in f or "/__pycache__/" in f:
+                    continue
+                try:
+                    with open(f, "rb") as fh:
+                        files[f] = hashlib.md5(fh.read()).hexdigest()
+                except Exception:
+                    pass
             return files
 
         while True:
@@ -474,7 +515,6 @@ class Pyre:
                             proc.kill()
                         break
                 else:
-                    # Process exited on its own (crash or Ctrl+C)
                     break
             except KeyboardInterrupt:
                 proc.terminate()
