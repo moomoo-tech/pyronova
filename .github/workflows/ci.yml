@@ -31,7 +31,7 @@ jobs:
         run: |
           python -m venv .venv
           source .venv/bin/activate
-          pip install maturin pytest websockets httpx pydantic numpy msgpack
+          pip install maturin pytest pytest-asyncio websockets httpx pydantic numpy msgpack
 
       - name: cargo test (Rust compile check)
         run: cargo test
@@ -44,7 +44,7 @@ jobs:
       - name: Run pytest (unit)
         run: |
           source .venv/bin/activate
-          pytest tests/test_mcp.py tests/test_cookies_unit.py tests/test_testclient.py tests/test_async_isolation.py tests/test_logging.py -v
+          pytest tests/test_mcp.py tests/test_cookies_unit.py tests/test_testclient.py tests/test_rpc.py tests/test_static_files.py tests/test_websocket.py tests/test_async_isolation.py tests/test_logging.py -v
 
   # ── Integration tests ─────────────────────────────────────────────
   test-integration:
@@ -68,7 +68,7 @@ jobs:
         run: |
           python -m venv .venv
           source .venv/bin/activate
-          pip install maturin pytest websockets httpx pydantic numpy msgpack
+          pip install maturin pytest pytest-asyncio websockets httpx pydantic numpy msgpack
 
       - name: Build (release)
         run: |
