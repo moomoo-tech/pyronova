@@ -99,7 +99,7 @@ pub(crate) struct ResponseData {
 // extract_headers
 // ---------------------------------------------------------------------------
 
-pub(crate) fn extract_headers(header_map: &hyper::HeaderMap) -> HashMap<String, String> {
+pub fn extract_headers(header_map: &hyper::HeaderMap) -> HashMap<String, String> {
     let mut headers = HashMap::with_capacity(header_map.len());
     for (name, value) in header_map.iter() {
         let key = name.as_str().to_string();
@@ -113,4 +113,81 @@ pub(crate) fn extract_headers(header_map: &hyper::HeaderMap) -> HashMap<String, 
             .or_insert(val);
     }
     headers
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_headers_basic() {
+        let mut hm = hyper::HeaderMap::new();
+        hm.insert("content-type", "application/json".parse().unwrap());
+        hm.insert("x-custom", "hello".parse().unwrap());
+        let h = extract_headers(&hm);
+        assert_eq!(h["content-type"], "application/json");
+        assert_eq!(h["x-custom"], "hello");
+    }
+
+    #[test]
+    fn extract_headers_empty() {
+        let hm = hyper::HeaderMap::new();
+        let h = extract_headers(&hm);
+        assert!(h.is_empty());
+    }
+
+    #[test]
+    fn extract_headers_multi_value() {
+        let mut hm = hyper::HeaderMap::new();
+        hm.append("accept", "text/html".parse().unwrap());
+        hm.append("accept", "application/json".parse().unwrap());
+        let h = extract_headers(&hm);
+        assert!(h["accept"].contains("text/html"));
+        assert!(h["accept"].contains("application/json"));
+        assert!(h["accept"].contains(", "));
+    }
+
+    #[test]
+    fn query_params_parsing() {
+        let req = SkyRequest {
+            method: "GET".to_string(),
+            path: "/search".to_string(),
+            params: HashMap::new(),
+            query: "q=hello+world&page=2&lang=en".to_string(),
+            headers: HashMap::new(),
+            body_bytes: Vec::new(),
+        };
+        let qp = req.query_params();
+        assert_eq!(qp["q"], "hello world");
+        assert_eq!(qp["page"], "2");
+        assert_eq!(qp["lang"], "en");
+    }
+
+    #[test]
+    fn query_params_empty() {
+        let req = SkyRequest {
+            method: "GET".to_string(),
+            path: "/".to_string(),
+            params: HashMap::new(),
+            query: "".to_string(),
+            headers: HashMap::new(),
+            body_bytes: Vec::new(),
+        };
+        assert!(req.query_params().is_empty());
+    }
+
+    #[test]
+    fn query_params_percent_encoded() {
+        let req = SkyRequest {
+            method: "GET".to_string(),
+            path: "/".to_string(),
+            params: HashMap::new(),
+            query: "name=%E4%B8%AD%E6%96%87".to_string(),
+            headers: HashMap::new(),
+            body_bytes: Vec::new(),
+        };
+        assert_eq!(req.query_params()["name"], "中文");
+    }
+
+    // Note: text() and json() require Python GIL, tested via Python tests.
 }

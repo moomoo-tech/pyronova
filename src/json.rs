@@ -42,3 +42,6 @@ pub(crate) fn py_to_json_value(obj: &pyo3::Bound<'_, pyo3::PyAny>) -> Result<ser
         obj.str().map_err(|e| e.to_string())?.to_string(),
     ))
 }
+
+// Note: py_to_json_value requires a Python interpreter, so it's tested
+// via Python integration tests rather than cargo test.

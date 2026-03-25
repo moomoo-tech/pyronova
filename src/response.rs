@@ -201,3 +201,100 @@ pub(crate) fn not_found_response() -> Response<Full<Bytes>> {
         .body(Full::new(Bytes::from_static(b"{\"error\":\"not found\"}")))
         .unwrap()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn body_bytes(resp: Response<Full<Bytes>>) -> Vec<u8> {
+        use http_body_util::BodyExt;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let collected = resp.into_body().collect().await.unwrap();
+            collected.to_bytes().to_vec()
+        })
+    }
+
+    #[test]
+    fn not_found_status_and_body() {
+        let resp = not_found_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp.headers()["content-type"], "application/json");
+        assert!(resp.headers()["server"].to_str().unwrap().starts_with("Pyre/"));
+        assert_eq!(body_bytes(resp), b"{\"error\":\"not found\"}");
+    }
+
+    #[test]
+    fn error_response_500() {
+        let resp = error_response("something broke");
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(resp.headers()["content-type"], "application/json");
+        let body = String::from_utf8(body_bytes(resp)).unwrap();
+        assert!(body.contains("something broke"));
+    }
+
+    #[test]
+    fn error_response_escapes_quotes() {
+        let resp = error_response(r#"bad "input""#);
+        let body = String::from_utf8(body_bytes(resp)).unwrap();
+        assert!(body.contains(r#"bad \"input\""#));
+    }
+
+    #[test]
+    fn overloaded_503_with_retry_after() {
+        let resp = overloaded_response("too busy");
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.headers()["retry-after"], "1");
+        let body = String::from_utf8(body_bytes(resp)).unwrap();
+        assert!(body.contains("too busy"));
+    }
+
+    #[test]
+    fn payload_too_large_413() {
+        let resp = payload_too_large_response();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = String::from_utf8(body_bytes(resp)).unwrap();
+        assert!(body.contains("payload too large"));
+    }
+
+    #[test]
+    fn gateway_timeout_504() {
+        let resp = gateway_timeout_response();
+        assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
+        let body = String::from_utf8(body_bytes(resp)).unwrap();
+        assert!(body.contains("request timeout"));
+    }
+
+    #[test]
+    fn build_response_ok() {
+        let data = ResponseData {
+            body: Bytes::from("hello"),
+            content_type: "text/plain".to_string(),
+            status: 200,
+            headers: HashMap::new(),
+        };
+        let resp = build_response(Ok(data)).unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()["content-type"], "text/plain");
+    }
+
+    #[test]
+    fn build_response_custom_status_and_headers() {
+        let mut headers = HashMap::new();
+        headers.insert("x-custom".to_string(), "value".to_string());
+        let data = ResponseData {
+            body: Bytes::from("created"),
+            content_type: "application/json".to_string(),
+            status: 201,
+            headers,
+        };
+        let resp = build_response(Ok(data)).unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(resp.headers()["x-custom"], "value");
+    }
+
+    #[test]
+    fn build_response_error_falls_back_to_500() {
+        let resp = build_response(Err("oops".to_string())).unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+}

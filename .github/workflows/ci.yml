@@ -44,7 +44,7 @@ jobs:
       - name: Run pytest (unit)
         run: |
           source .venv/bin/activate
-          pytest tests/test_async_isolation.py tests/test_logging.py -v
+          pytest tests/test_mcp.py tests/test_cookies_unit.py tests/test_testclient.py tests/test_async_isolation.py tests/test_logging.py -v
 
   # ── Integration tests ─────────────────────────────────────────────
   test-integration:

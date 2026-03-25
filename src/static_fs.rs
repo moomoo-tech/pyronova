@@ -2,7 +2,7 @@ use bytes::Bytes;
 use http_body_util::Full;
 use hyper::{Response, StatusCode};
 
-pub(crate) fn mime_from_ext(ext: &str) -> &'static str {
+pub fn mime_from_ext(ext: &str) -> &'static str {
     match ext {
         "html" | "htm" => "text/html; charset=utf-8",
         "css" => "text/css; charset=utf-8",
@@ -24,6 +24,59 @@ pub(crate) fn mime_from_ext(ext: &str) -> &'static str {
         "wasm" => "application/wasm",
         "map" => "application/json",
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mime_html() {
+        assert_eq!(mime_from_ext("html"), "text/html; charset=utf-8");
+        assert_eq!(mime_from_ext("htm"), "text/html; charset=utf-8");
+    }
+
+    #[test]
+    fn mime_js_css() {
+        assert_eq!(mime_from_ext("css"), "text/css; charset=utf-8");
+        assert_eq!(mime_from_ext("js"), "application/javascript; charset=utf-8");
+        assert_eq!(mime_from_ext("mjs"), "application/javascript; charset=utf-8");
+    }
+
+    #[test]
+    fn mime_images() {
+        assert_eq!(mime_from_ext("png"), "image/png");
+        assert_eq!(mime_from_ext("jpg"), "image/jpeg");
+        assert_eq!(mime_from_ext("jpeg"), "image/jpeg");
+        assert_eq!(mime_from_ext("gif"), "image/gif");
+        assert_eq!(mime_from_ext("svg"), "image/svg+xml");
+        assert_eq!(mime_from_ext("webp"), "image/webp");
+        assert_eq!(mime_from_ext("ico"), "image/x-icon");
+    }
+
+    #[test]
+    fn mime_fonts() {
+        assert_eq!(mime_from_ext("woff"), "font/woff");
+        assert_eq!(mime_from_ext("woff2"), "font/woff2");
+        assert_eq!(mime_from_ext("ttf"), "font/ttf");
+        assert_eq!(mime_from_ext("otf"), "font/otf");
+    }
+
+    #[test]
+    fn mime_application() {
+        assert_eq!(mime_from_ext("json"), "application/json; charset=utf-8");
+        assert_eq!(mime_from_ext("pdf"), "application/pdf");
+        assert_eq!(mime_from_ext("xml"), "application/xml; charset=utf-8");
+        assert_eq!(mime_from_ext("wasm"), "application/wasm");
+        assert_eq!(mime_from_ext("map"), "application/json");
+    }
+
+    #[test]
+    fn mime_unknown_fallback() {
+        assert_eq!(mime_from_ext("xyz"), "application/octet-stream");
+        assert_eq!(mime_from_ext(""), "application/octet-stream");
+        assert_eq!(mime_from_ext("bin"), "application/octet-stream");
     }
 }
 
