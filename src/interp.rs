@@ -508,19 +508,19 @@ _mock_skytrade.redirect = _redirect
 # Pyre wrapper (no-op in worker mode)
 class _MockPyre:
     def __init__(self): pass
-    def get(self, path, handler=None, *, gil=False):
+    def get(self, path, handler=None, *, gil=False, model=None):
         if handler: return handler
         return lambda f: f
-    def post(self, path, handler=None, *, gil=False):
+    def post(self, path, handler=None, *, gil=False, model=None):
         if handler: return handler
         return lambda f: f
-    def put(self, path, handler=None, *, gil=False):
+    def put(self, path, handler=None, *, gil=False, model=None):
         if handler: return handler
         return lambda f: f
-    def delete(self, path, handler=None, *, gil=False):
+    def delete(self, path, handler=None, *, gil=False, model=None):
         if handler: return handler
         return lambda f: f
-    def patch(self, path, handler=None, *, gil=False):
+    def patch(self, path, handler=None, *, gil=False, model=None):
         if handler: return handler
         return lambda f: f
     def route(self, *a, **kw):
@@ -531,6 +531,8 @@ class _MockPyre:
         return f if f else lambda fn: fn
     def fallback(self, f=None):
         return f if f else lambda fn: fn
+    def rpc(self, path, **kw):
+        return lambda f: f
     def websocket(self, path, handler=None):
         if handler: return handler
         return lambda f: f
@@ -588,6 +590,30 @@ _cookies_mod.set_cookie = _set_cookie
 _cookies_mod.delete_cookie = _delete_cookie
 sys.modules["skytrade.cookies"] = _cookies_mod
 sys.modules["skytrade.rpc"] = types.ModuleType("skytrade.rpc")
+sys.modules["skytrade.testing"] = types.ModuleType("skytrade.testing")
+
+# Mock pydantic so user scripts with `from pydantic import BaseModel` don't crash.
+# Actual validation runs in GIL mode only — sub-interp gets a no-op stub.
+class _FakeBaseModel:
+    def __init_subclass__(cls, **kw): pass
+    def __init__(self, **kw):
+        for k, v in kw.items(): setattr(self, k, v)
+    @classmethod
+    def model_validate_json(cls, data): return cls()
+    @classmethod
+    def model_json_schema(cls): return {{}}
+class _FakeField:
+    def __init__(self, **kw): pass
+    def __call__(self, **kw): return self
+_pydantic_mod = types.ModuleType("pydantic")
+_pydantic_mod.BaseModel = _FakeBaseModel
+_pydantic_mod.Field = _FakeField(**{{}})
+_pydantic_mod.field_validator = lambda *a, **kw: (lambda f: f)
+sys.modules["pydantic"] = _pydantic_mod
+# Also mock pydantic sub-modules that get imported
+for _pm in ("pydantic.fields", "pydantic.main", "pydantic._migration",
+            "pydantic.warnings", "pydantic.version", "pydantic_core"):
+    sys.modules[_pm] = types.ModuleType(_pm)
 
 # Upload utilities
 _uploads_mod = types.ModuleType("skytrade.uploads")

@@ -195,6 +195,38 @@ Benchmarked on Apple Silicon (M-series), Python 3.14, wrk -t4 -c256 -d10s.
 | OpenAPI docs | — | ✅ | ❌ | Pyre uses MCP for AI discovery; type hints serve as docs |
 | Dependency injection | — | ✅ `Depends()` | ❌ | Pyre uses `before_request` hooks for the same purpose |
 
+### C Extension Compatibility
+
+Python C extensions (PyO3/Rust, C/C++) use global state that isn't compatible with sub-interpreters (PEP 684). This is a CPython ecosystem limitation, not a Pyre limitation.
+
+| Library | Sub-interp (`def`) | GIL route (`gil=True`) | Why |
+|---------|-------------------|----------------------|-----|
+| **pydantic** | ❌ | ✅ | pydantic-core is PyO3, global static |
+| **numpy** | ❌ | ✅ | Hardcoded "load once per process" check |
+| **orjson** | ❌ (strict mode) | ✅ | PyO3 module |
+| **Pure Python libs** | ✅ | ✅ | No global C state |
+| **json, hashlib, asyncio** | ✅ | ✅ | stdlib, no issues |
+
+**The fix is simple: add `gil=True` to routes that need C extensions.**
+
+```python
+# Fast route — sub-interpreter, 220k req/s, no C extensions needed
+@app.get("/fast")
+def fast(req):
+    return {"hello": "world"}
+
+# Heavy route — GIL main interpreter, full C extension support
+@app.post("/analyze", model=AnalysisRequest, gil=True)
+def analyze(req, data):
+    import numpy as np
+    import pandas as pd
+    return {"mean": float(np.mean(data.values))}
+```
+
+Pyre auto-detects which routes need GIL and dispatches accordingly. Fast routes stay at 220k req/s; GIL routes get full ecosystem access. Both run concurrently in the same server.
+
+> **When will this be fixed?** When PyO3 and numpy add PEP 684 multi-phase init support. Tracking: [PyO3#3451](https://github.com/PyO3/pyo3/issues/3451), [numpy#24003](https://github.com/numpy/numpy/issues/24003). When they do, these libraries will run at full speed in sub-interpreters — no `gil=True` needed.
+
 > **Why no OpenAPI?** Pyre targets high-performance APIs and AI agents, not browser-based API explorers. For AI tool discovery, MCP is a more modern protocol. For human developers, Pydantic models + type stubs provide the same contract guarantees.
 >
 > **Why no dependency injection?** `before_request` hooks solve the same problem (auth, DB connections, shared logic) with less magic and better debuggability. DI adds framework coupling without performance benefit.
