@@ -22,10 +22,45 @@ Quick guide:
 | AI Agent (LLM 调用) | `mode="async"` | await LLM 响应 |
 | SSE 流式输出 | `gil=True` + SkyStream | 长连接流式传输 |
 
+### 混用 sync + async handler
+
+`mode="async"` 同时支持 `def` 和 `async def`：
+
+```python
+@app.get("/fast")
+def fast(req):              # sync — 直接执行
+    return "hello"
+
+@app.get("/io")
+async def io_heavy(req):    # async — await 不阻塞
+    await asyncio.sleep(0.1)
+    return "done"
+
+app.run(mode="async")       # 两种都能跑
+```
+
+注意：sync handler 在 async 模式下有 ~35% 吞吐量开销（asyncio 引擎中转）。
+如果全是 sync handler，用默认模式（`app.run()`）更快。
+
 ### 不需要选择的情况
 
 - 如果所有 handler 都是普通 `def` 且没有 I/O 等待 → 直接 `app.run()`，不传任何参数
+- 如果混用 sync + async → `app.run(mode="async")`
 - 框架默认使用 `subinterp` 模式，这是最快的
+
+### 子解释器内存效率
+
+每个子解释器增量 ~10 MB（共享进程代码段和共享库）：
+
+| Workers | Pyre SubInterp | Robyn 多进程 |
+|---------|---------------|-------------|
+| 1 | 31 MB | ~20 MB |
+| 10 | 119 MB | 447 MB |
+| 32 | 333 MB | ~660 MB |
+
+共享的：CPython 核心代码、Rust 二进制、`.so` 共享库的只读代码段。
+不共享的：Python 堆（模块字典、用户对象）、GIL 状态。
+C 扩展（numpy/orjson）的 `.so` 文件只 mmap 一次，32 workers 摊薄基线。
 
 ## 日志
 
