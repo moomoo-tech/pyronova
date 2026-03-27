@@ -137,10 +137,18 @@ Benchmark: SubInterp 215k (channel pool, -0.5% vs mutex), GIL 104k (+3%), Robyn 
 - PyO3 tracking issue: https://github.com/PyO3/pyo3/issues/3451
 - 如果 Step 2 的 fork 稳定，可以向 PyO3 上游提 PR
 - ~~关注 numpy/orjson/pydantic 等库的 `Py_MOD_PER_INTERPRETER_GIL_SUPPORTED` 适配进度~~
-- ✅ **numpy 2.4 + pandas 3.0 已通过子解释器并发测试** (Python 3.14, 2026-03-27)
-  - 8 个 sub-interpreter 并发跑 pandas DataFrame + MACD/RSI/Bollinger/ATR/VWAP，0.04 秒
-  - `check_multi_interp_extensions: 1` 无需关闭，numpy/pandas 已原生声明兼容
+- ✅ **PEP 684 子解释器第三方库兼容性测试通过** (Python 3.14, 2026-03-27)
+  - 30/30 库通过 sub-interpreter import + 基本操作测试
+  - 8 并发 sub-interpreter 压测全部通过
+  - `check_multi_interp_extensions: 1` 无需关闭
   - Pyre 时代的 shared GIL workaround 不再需要
+  - **已验证兼容列表：**
+    - 数据科学：numpy 2.4, pandas 3.0, scipy 1.17, polars 1.39, pyarrow 23.0
+    - ML：scikit-learn 1.8, xgboost 3.2, lightgbm 4.6
+    - 序列化：orjson 3.11, msgpack 1.1, json, csv
+    - 网络：requests, aiohttp, websockets
+    - 数据库：sqlite3
+    - 标准库：collections, dataclasses, typing, math, statistics, decimal, datetime, re, hashlib, struct, ctypes, threading, queue, logging
 
 ## Phase 6 — 协议突破 (进行中) — v0.4.0
 
