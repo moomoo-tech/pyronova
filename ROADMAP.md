@@ -136,7 +136,11 @@ Benchmark: SubInterp 215k (channel pool, -0.5% vs mutex), GIL 104k (+3%), Robyn 
 
 - PyO3 tracking issue: https://github.com/PyO3/pyo3/issues/3451
 - 如果 Step 2 的 fork 稳定，可以向 PyO3 上游提 PR
-- 关注 numpy/orjson/pydantic 等库的 `Py_MOD_PER_INTERPRETER_GIL_SUPPORTED` 适配进度
+- ~~关注 numpy/orjson/pydantic 等库的 `Py_MOD_PER_INTERPRETER_GIL_SUPPORTED` 适配进度~~
+- ✅ **numpy 2.4 + pandas 3.0 已通过子解释器并发测试** (Python 3.14, 2026-03-27)
+  - 8 个 sub-interpreter 并发跑 pandas DataFrame + MACD/RSI/Bollinger/ATR/VWAP，0.04 秒
+  - `check_multi_interp_extensions: 1` 无需关闭，numpy/pandas 已原生声明兼容
+  - Pyre 时代的 shared GIL workaround 不再需要
 
 ## Phase 6 — 协议突破 (进行中) — v0.4.0
 
@@ -363,6 +367,7 @@ def hit_counter(req):
 - [ ] OpenTelemetry tracing 集成
 - [ ] Rate limiting middleware
 - [ ] Dependency injection (轻量级, 基于 `before_request`)
+- [ ] 子解释器第三方库兼容性文档 — numpy/pandas 已通过测试 (见下方)
 
 ### 中期
 - [ ] io_uring backend (Linux, monoio)
