@@ -18,6 +18,7 @@ High-performance Python web framework powered by Rust. Per-Interpreter GIL (PEP 
   - `interp.rs` — `PyObjRef` RAII, C-FFI bridge (`pyre_recv`/`pyre_send`), dual worker pool (sync+async), mock module injection
   - `websocket.rs` — WebSocket upgrade, `PyreWebSocket` pyclass, async↔sync bridge
   - `stream.rs` — `PyreStream` SSE with mpsc channel
+  - `logging.rs` — `init_logger` (tracing-subscriber), `emit_python_log` (Python→Rust bridge)
   - `monitor.rs` — GIL watchdog, memory RSS, atomic counters
   - `state.rs` — `SharedState` backed by `Arc<DashMap>`
 - **Python interface** (`python/pyreframework/`):
@@ -72,6 +73,7 @@ bash benchmarks/run_bench.sh
 - Middleware: before_request/after_request hooks stored in RouteTable
 - WebSocket: tokio-tungstenite async ↔ Python sync via dual channels, one OS thread per connection
 - SSE: `PyreStream` with mpsc unbounded channel, returned from handler
+- Logging: Rust `tracing` with `EnvFilter` (zero-cost OFF), three targets (`pyre::server`, `pyre::access`, `pyre::app`), Python logging hijacked via C-FFI bridge in sub-interpreters
 - mimalloc global allocator for high-concurrency allocation performance
 - 30s zombie request timeout in sub-interpreter mode (504 Gateway Timeout)
 - Graceful shutdown via `signal::ctrl_c()` + `tokio::select!`
@@ -81,6 +83,7 @@ bash benchmarks/run_bench.sh
 ```
 src/
   lib.rs              # Module declarations + #[pymodule] + mimalloc
+  logging.rs          # Rust tracing engine + Python logging bridge
   types.rs            # PyreRequest, PyreResponse, extract_headers
   app.rs              # PyreApp — route registration + server startup
   handlers.rs         # handle_request (GIL), handle_request_subinterp (channel)
@@ -126,6 +129,8 @@ docs/
   dual-engine-design.md        # Dual pool architecture
   gil-monitor-design.md        # GIL watchdog design
   gc-optimization-guide.md     # GC tuning
+  logging-design.md            # 日志系统设计（中文）
+  logging-design.en.md         # Logging system design (English)
   zero-copy-design.md          # Zero-copy design
   rpc-engine-design.md         # RPC engine design
   why-not-multiprocess.md      # Architecture rationale

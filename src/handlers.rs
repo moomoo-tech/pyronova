@@ -91,6 +91,7 @@ pub(crate) async fn handle_request(
     routes: FrozenRoutes,
 ) -> Result<Response<BoxBody>, hyper::Error> {
     crate::monitor::TOTAL_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let start = std::time::Instant::now();
     let method = req.method().to_string();
     let uri = req.uri().clone();
     let path = uri.path().to_string();
@@ -119,6 +120,8 @@ pub(crate) async fn handle_request(
         None => return Ok(full_body(not_found_response())),
     };
 
+    let method_log = method.clone();
+    let path_log = path.clone();
     let sky_req = PyreRequest {
         method,
         path,
@@ -136,10 +139,22 @@ pub(crate) async fn handle_request(
                 HandlerResult::Response(Err("handler thread panicked".to_string()))
             });
 
-    match handler_result {
-        HandlerResult::Response(result) => Ok(full_body(build_response(result)?)),
-        HandlerResult::Stream(info) => Ok(build_stream_response(info)),
-    }
+    let resp = match handler_result {
+        HandlerResult::Response(result) => full_body(build_response(result)?),
+        HandlerResult::Stream(info) => build_stream_response(info),
+    };
+    let latency_us = start.elapsed().as_micros() as u64;
+    let status = resp.status().as_u16();
+    tracing::info!(
+        target: "pyre::access",
+        method = %method_log,
+        path = %path_log,
+        status,
+        latency_us,
+        mode = "gil",
+        "Request handled"
+    );
+    Ok(resp)
 }
 
 // ---------------------------------------------------------------------------
@@ -312,6 +327,7 @@ pub(crate) async fn handle_request_subinterp(
     routes: FrozenRoutes,
 ) -> Result<Response<BoxBody>, hyper::Error> {
     crate::monitor::TOTAL_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let start = std::time::Instant::now();
     let method = req.method().to_string();
     let uri = req.uri().clone();
     let path = uri.path().to_string();
@@ -346,6 +362,8 @@ pub(crate) async fn handle_request_subinterp(
         handler_idx == usize::MAX || pool.requires_gil.get(handler_idx).copied().unwrap_or(false);
 
     if is_gil_route {
+        let method_log = method.clone();
+        let path_log = path.clone();
         let sky_req = PyreRequest {
             method,
             path,
@@ -361,13 +379,27 @@ pub(crate) async fn handle_request_subinterp(
         .await
         .unwrap_or_else(|_| HandlerResult::Response(Err("handler thread panicked".to_string())));
 
-        return match handler_result {
-            HandlerResult::Response(result) => Ok(full_body(build_response(result)?)),
-            HandlerResult::Stream(info) => Ok(build_stream_response(info)),
+        let resp = match handler_result {
+            HandlerResult::Response(result) => full_body(build_response(result)?),
+            HandlerResult::Stream(info) => build_stream_response(info),
         };
+        let latency_us = start.elapsed().as_micros() as u64;
+        let status = resp.status().as_u16();
+        tracing::info!(
+            target: "pyre::access",
+            method = %method_log,
+            path = %path_log,
+            status,
+            latency_us,
+            mode = "gil",
+            "Request handled"
+        );
+        return Ok(resp);
     }
 
     // ── Default: sub-interpreter (fast path) ──
+    let method_log = method.clone();
+    let path_log = path.clone();
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
     if let Err(e) = pool.submit(interp::WorkRequest {
@@ -393,7 +425,7 @@ pub(crate) async fn handle_request_subinterp(
         }
     };
 
-    match result {
+    let http_resp = match result {
         Ok(resp) => {
             let ct = resp.content_type.unwrap_or_else(|| {
                 if resp.is_json || resp.body.starts_with(b"{") || resp.body.starts_with(b"[") {
@@ -419,10 +451,22 @@ pub(crate) async fn handle_request_subinterp(
                 );
                 builder = builder.header("access-control-allow-headers", "*");
             }
-            Ok(full_body(
+            full_body(
                 builder.body(Full::new(Bytes::from(resp.body))).unwrap(),
-            ))
+            )
         }
-        Err(e) => Ok(full_body(error_response(&e))),
-    }
+        Err(e) => full_body(error_response(&e)),
+    };
+    let latency_us = start.elapsed().as_micros() as u64;
+    let status = http_resp.status().as_u16();
+    tracing::info!(
+        target: "pyre::access",
+        method = %method_log,
+        path = %path_log,
+        status,
+        latency_us,
+        mode = "subinterp",
+        "Request handled"
+    );
+    Ok(http_resp)
 }

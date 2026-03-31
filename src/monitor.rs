@@ -54,7 +54,11 @@ pub fn spawn_gil_watchdog() {
 
                 // Alert if GIL blocked > 50ms
                 if elapsed_us > 50_000 {
-                    eprintln!("⚠️  [WATCHDOG] Main GIL congested: {}ms", elapsed_us / 1000);
+                    tracing::warn!(
+                        target: "pyre::server",
+                        latency_ms = elapsed_us / 1000,
+                        "GIL watchdog: main GIL congested"
+                    );
                 }
 
                 // Sample memory RSS

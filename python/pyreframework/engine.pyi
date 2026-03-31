@@ -2,6 +2,21 @@
 
 from typing import Optional
 
+def init_logger(level: str, access_log: bool, format: str) -> None:
+    """Initialize the Rust tracing engine. Call once at startup."""
+    ...
+
+def emit_python_log(
+    level: str,
+    name: str,
+    message: str,
+    pathname: str,
+    lineno: int,
+    worker_id: Optional[int] = None,
+) -> None:
+    """Route a Python log record through Rust tracing."""
+    ...
+
 class PyreRequest:
     method: str
     path: str

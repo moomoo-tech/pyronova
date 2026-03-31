@@ -5,6 +5,7 @@ mod app;
 mod handlers;
 mod interp;
 mod json;
+mod logging;
 mod monitor;
 mod response;
 mod router;
@@ -25,5 +26,7 @@ fn engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<state::SharedState>()?;
     m.add_class::<stream::PyreStream>()?;
     m.add_function(pyo3::wrap_pyfunction!(monitor::get_gil_metrics, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(logging::init_logger, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(logging::emit_python_log, m)?)?;
     Ok(())
 }

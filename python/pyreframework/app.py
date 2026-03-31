@@ -4,16 +4,68 @@ from __future__ import annotations
 
 import time
 import sys
-from typing import Callable
+from typing import Callable, TypedDict
 
 import os
 
-from pyreframework.engine import PyreApp as _PyreApp, PyreResponse
+from pyreframework.engine import PyreApp as _PyreApp, PyreResponse, init_logger, emit_python_log
 from pyreframework.mcp import MCPServer
+
+
+class LogConfig(TypedDict, total=False):
+    """Logging configuration dictionary.
+
+    Keys:
+        level: "OFF", "ERROR", "WARN", "INFO", "DEBUG", "TRACE"
+        access_log: Whether to log every HTTP request (method, path, status, latency)
+        format: "text" (human-readable) or "json" (structured, for ELK/Datadog)
+    """
+    level: str
+    access_log: bool
+    format: str
 
 def _is_worker() -> bool:
     """Check if we're running inside a sub-interpreter worker."""
     return os.environ.get("PYRE_WORKER") == "1"
+
+
+def _setup_python_logging_bridge() -> None:
+    """Hijack Python's root logger to route all logs through Rust tracing.
+
+    Replaces default StreamHandler (synchronous, GIL-blocking I/O) with a
+    lightweight handler that crosses FFI into Rust's tracing system.
+    The actual filtering, formatting, and I/O happen in Rust — Python only
+    does the minimal work of extracting the log record fields.
+    """
+    import logging
+
+    class PyreRustHandler(logging.Handler):
+        """logging.Handler that bridges to Rust tracing via FFI."""
+
+        def emit(self, record: logging.LogRecord) -> None:
+            try:
+                msg = record.getMessage()
+                # Preserve exception tracebacks (logger.exception / exc_info=True)
+                if record.exc_info and not record.exc_text:
+                    record.exc_text = self.formatException(record.exc_info)
+                if record.exc_text:
+                    msg = f"{msg}\n{record.exc_text}"
+                emit_python_log(
+                    level=record.levelname,
+                    name=record.name,
+                    message=msg,
+                    pathname=record.pathname or "",
+                    lineno=record.lineno or 0,
+                )
+            except Exception:
+                # Never let logging bridge errors crash business logic
+                pass
+
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.addHandler(PyreRustHandler())
+    # Let everything through — Rust EnvFilter does the real filtering
+    root.setLevel(logging.DEBUG)
 
 
 class Pyre:
@@ -50,11 +102,34 @@ class Pyre:
         app.run()                   # zero config, auto dual-pool
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        debug: bool = False,
+        log_config: LogConfig | None = None,
+    ) -> None:
         self._engine = _PyreApp()
         self._fallback_handler: Callable | None = None
         self._fallback_name: str | None = None
         self._mcp = MCPServer()
+        self.debug = debug
+
+        # Resolve final logging config: debug mode defaults vs production defaults.
+        # Actual init_logger call is deferred to run() so enable_logging() can
+        # adjust the config before the tracing subscriber is locked in.
+        user = log_config or {}
+        if self.debug:
+            self._log_config: LogConfig = {
+                "level": user.get("level", "DEBUG"),
+                "access_log": user.get("access_log", True),
+                "format": user.get("format", "text"),
+            }
+        else:
+            self._log_config: LogConfig = {
+                "level": user.get("level", "ERROR"),
+                "access_log": user.get("access_log", False),
+                "format": user.get("format", "json"),
+            }
+        self._logger_initialized = False
 
     @property
     def mcp(self) -> MCPServer:
@@ -321,7 +396,11 @@ class Pyre:
     def enable_logging(self, level: str = "info") -> None:
         """Enable structured request/response logging.
 
-        Output format::
+        This activates both:
+        - Rust-side access log (method, path, status, latency_us) via tracing
+        - Python-side formatted output for GIL mode (human-readable)
+
+        Output format (GIL mode, text format)::
 
             2026-03-24 17:30:01 [INFO]  GET /api/trade → 200 (2.3ms)
             2026-03-24 17:30:01 [ERROR] POST /rpc/add → 500 (0.4ms) TypeError: ...
@@ -372,6 +451,13 @@ class Pyre:
         # Also enable Rust-level logging for sub-interpreter mode (per-instance)
         self._engine.enable_request_logging(True)
 
+        # Upgrade log config so the deferred init_logger picks up access_log
+        level_map = {"debug": "DEBUG", "info": "INFO", "warn": "WARN", "error": "ERROR"}
+        rust_level = level_map.get(level.lower(), "INFO")
+        if self._log_config.get("level", "ERROR") in ("ERROR", "OFF"):
+            self._log_config["level"] = rust_level
+        self._log_config["access_log"] = True
+
     # ------------------------------------------------------------------
     # Run
     # ------------------------------------------------------------------
@@ -395,10 +481,21 @@ class Pyre:
             self._run_with_reload()
             return
 
-        # Auto-enable logging if PYRE_LOG=1
-        if os.environ.get("PYRE_LOG") == "1" and not hasattr(self, "_logging_enabled"):
+        # Auto-enable logging if PYRE_LOG=1 or debug=True
+        if (os.environ.get("PYRE_LOG") == "1" or self.debug) and not hasattr(self, "_logging_enabled"):
             self.enable_logging()
             self._logging_enabled = True
+
+        # Initialize Rust tracing engine (deferred from __init__ so
+        # enable_logging() can adjust the config first)
+        if not self._logger_initialized:
+            self._logger_initialized = True
+            init_logger(
+                self._log_config["level"],
+                self._log_config["access_log"],
+                self._log_config["format"],
+            )
+            _setup_python_logging_bridge()
         # Auto-register /mcp endpoint if any MCP handlers exist
         if self._mcp._tools or self._mcp._resources or self._mcp._prompts:
             mcp = self._mcp

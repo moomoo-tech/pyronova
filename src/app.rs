@@ -165,7 +165,7 @@ impl PyreApp {
         WATCHDOG_INIT.call_once(|| {
             if std::env::var("PYRE_METRICS").unwrap_or_default() == "1" {
                 crate::monitor::spawn_gil_watchdog();
-                println!("  GIL watchdog: enabled (PYRE_METRICS=1)");
+                tracing::info!(target: "pyre::server", "GIL watchdog enabled (PYRE_METRICS=1)");
             }
         });
 
@@ -249,6 +249,15 @@ impl PyreApp {
         num_cpus: usize,
         routes: FrozenRoutes,
     ) -> PyResult<()> {
+        tracing::info!(
+            target: "pyre::server",
+            version = env!("CARGO_PKG_VERSION"),
+            %addr,
+            workers,
+            cpus = num_cpus,
+            mode = "gil",
+            "Pyre started"
+        );
         println!("\n  Pyre v{}", env!("CARGO_PKG_VERSION"));
         println!("  Listening on http://{addr}");
         println!("  Workers: {workers} (CPUs: {num_cpus})\n");
@@ -269,6 +278,7 @@ impl PyreApp {
 
                 let shutdown = async {
                     signal::ctrl_c().await.ok();
+                    tracing::info!(target: "pyre::server", "Shutting down gracefully...");
                     println!("\n  Shutting down gracefully...");
                 };
                 tokio::pin!(shutdown);
@@ -305,7 +315,7 @@ impl PyreApp {
                                         && !msg.contains("reset by peer")
                                         && !msg.contains("broken pipe")
                                     {
-                                        eprintln!("connection error: {e}");
+                                        tracing::warn!(target: "pyre::server", error = %e, "Connection error");
                                     }
                                 }
                             });
@@ -358,6 +368,18 @@ impl PyreApp {
         let async_count_routes = routes.is_async.iter().filter(|&&a| a).count();
         let has_async = async_count_routes > 0;
         let mode_label = if has_async { "hybrid-async" } else { "hybrid" };
+        tracing::info!(
+            target: "pyre::server",
+            version = env!("CARGO_PKG_VERSION"),
+            mode = mode_label,
+            %addr,
+            workers,
+            cpus = num_cpus,
+            subinterp_routes = subinterp_count,
+            gil_routes = gil_count,
+            async_routes = async_count_routes,
+            "Pyre started"
+        );
         println!(
             "\n  Pyre v{} [{mode_label} mode]",
             env!("CARGO_PKG_VERSION")
@@ -413,6 +435,7 @@ impl PyreApp {
 
                 let shutdown = async {
                     signal::ctrl_c().await.ok();
+                    tracing::info!(target: "pyre::server", "Shutting down gracefully...");
                     println!("\n  Shutting down gracefully...");
                 };
                 tokio::pin!(shutdown);
@@ -451,7 +474,7 @@ impl PyreApp {
                                         && !msg.contains("reset by peer")
                                         && !msg.contains("broken pipe")
                                     {
-                                        eprintln!("connection error: {e}");
+                                        tracing::warn!(target: "pyre::server", error = %e, "Connection error");
                                     }
                                 }
                             });

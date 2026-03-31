@@ -183,7 +183,7 @@ pub(crate) async fn handle_websocket(
                 run_ws_connection(ws_stream, handler).await;
             }
             Err(e) => {
-                eprintln!("WebSocket upgrade error: {e}");
+                tracing::error!(target: "pyre::server", error = %e, "WebSocket upgrade error");
             }
         }
     });
@@ -212,7 +212,7 @@ where
         Python::attach(|py| {
             let ws_obj = Py::new(py, sky_ws).unwrap();
             if let Err(e) = handler.call1(py, (ws_obj,)) {
-                eprintln!("WebSocket handler error: {e}");
+                tracing::error!(target: "pyre::server", error = %e, "WebSocket handler error");
             }
         });
     });
@@ -240,7 +240,7 @@ where
                         let _ = ws_sink.send(Message::Pong(data)).await;
                     }
                     Some(Err(e)) => {
-                        eprintln!("WebSocket read error: {e}");
+                        tracing::warn!(target: "pyre::server", error = %e, "WebSocket read error");
                         break;
                     }
                     _ => {} // Pong

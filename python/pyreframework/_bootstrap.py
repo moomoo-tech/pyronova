@@ -4,11 +4,55 @@ Provides mock pyreframework modules so user scripts can be executed in isolated
 sub-interpreters without importing the real Rust extension (which doesn't
 support PEP 684 multi-interpreter loading).
 
+Also installs PyreRustHandler to hijack Python's logging module — all log
+records are routed through the _pyre_emit_log C-FFI function into Rust's
+tracing system for zero-GIL-blocking I/O.
+
 WARNING: This replaces `sys.modules["pydantic"]` with a no-op stub.
 Pydantic validation is only available on routes with `gil=True`.
 Sub-interpreter routes get a stub that lets `from pydantic import BaseModel`
 succeed but does NOT perform real validation.
 """
+
+# -- Python logging bridge to Rust tracing -----------------------------------
+
+import logging as _logging
+
+class _PyreRustHandler(_logging.Handler):
+    """Routes Python logging records through Rust tracing via C-FFI.
+
+    _pyre_emit_log is injected into globals by Rust (interp.rs) before
+    this bootstrap script runs. It accepts (level, name, message, pathname,
+    lineno, worker_id) and dispatches to tracing macros with near-zero cost.
+    """
+
+    def __init__(self, worker_id=0):
+        super().__init__()
+        self._worker_id = worker_id
+
+    def emit(self, record):
+        try:
+            msg = record.getMessage()
+            # Preserve exception tracebacks (logger.exception / exc_info=True)
+            if record.exc_info and not record.exc_text:
+                record.exc_text = self.formatException(record.exc_info)
+            if record.exc_text:
+                msg = f"{msg}\n{record.exc_text}"
+            _pyre_emit_log(
+                record.levelname,
+                record.name,
+                msg,
+                record.pathname or "",
+                record.lineno or 0,
+                self._worker_id,
+            )
+        except Exception:
+            pass  # Never crash business logic due to logging
+
+_root = _logging.getLogger()
+_root.handlers.clear()
+_root.addHandler(_PyreRustHandler())
+_root.setLevel(_logging.DEBUG)  # Let Rust EnvFilter do the real filtering
 
 # -- Request / Response stubs ------------------------------------------------
 
@@ -82,7 +126,7 @@ _mock_pyreframework.redirect = _redirect
 
 # Pyre wrapper (no-op in worker mode)
 class _MockPyre:
-    def __init__(self): pass
+    def __init__(self, debug=False, log_config=None): pass
     def get(self, path, handler=None, *, gil=False, model=None):
         if handler: return handler
         return lambda f: f

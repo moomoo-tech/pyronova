@@ -196,6 +196,130 @@ unsafe extern "C" fn pyre_send_cfunc(
 }
 
 // ---------------------------------------------------------------------------
+// C-FFI bridge: emit_python_log for sub-interpreter logging
+// ---------------------------------------------------------------------------
+
+/// _pyre_emit_log(level, name, message, pathname, lineno, worker_id)
+/// Routes Python logging.Handler.emit() calls through Rust tracing.
+/// Minimal GIL hold time — extract strings, dispatch to tracing, return.
+unsafe extern "C" fn pyre_emit_log_cfunc(
+    _self: *mut ffi::PyObject,
+    args: *mut ffi::PyObject,
+) -> *mut ffi::PyObject {
+    let mut level_ptr: *const std::os::raw::c_char = std::ptr::null();
+    let mut name_ptr: *const std::os::raw::c_char = std::ptr::null();
+    let mut msg_ptr: *const std::os::raw::c_char = std::ptr::null();
+    let mut path_ptr: *const std::os::raw::c_char = std::ptr::null();
+    let mut lineno: i32 = 0;
+    let mut worker_id: isize = 0;
+
+    // Parse: (str, str, str, str, int, int)
+    if ffi::PyArg_ParseTuple(
+        args,
+        c"ssssin".as_ptr(),
+        &mut level_ptr,
+        &mut name_ptr,
+        &mut msg_ptr,
+        &mut path_ptr,
+        &mut lineno,
+        &mut worker_id,
+    ) == 0
+    {
+        // Return None on parse error (don't crash the handler)
+        ffi::PyErr_Clear();
+        ffi::Py_INCREF(ffi::Py_None());
+        return ffi::Py_None();
+    }
+
+    let level = if !level_ptr.is_null() {
+        std::ffi::CStr::from_ptr(level_ptr)
+            .to_str()
+            .unwrap_or("INFO")
+    } else {
+        "INFO"
+    };
+    let name = if !name_ptr.is_null() {
+        std::ffi::CStr::from_ptr(name_ptr)
+            .to_str()
+            .unwrap_or("unknown")
+    } else {
+        "unknown"
+    };
+    let message = if !msg_ptr.is_null() {
+        std::ffi::CStr::from_ptr(msg_ptr)
+            .to_str()
+            .unwrap_or("")
+    } else {
+        ""
+    };
+    let pathname = if !path_ptr.is_null() {
+        std::ffi::CStr::from_ptr(path_ptr)
+            .to_str()
+            .unwrap_or("")
+    } else {
+        ""
+    };
+
+    let wid = worker_id as usize;
+
+    match level {
+        "DEBUG" => {
+            tracing::debug!(
+                target: "pyre::app",
+                worker = wid,
+                logger = %name,
+                file = %pathname,
+                line = lineno,
+                "{}", message
+            );
+        }
+        "INFO" => {
+            tracing::info!(
+                target: "pyre::app",
+                worker = wid,
+                logger = %name,
+                file = %pathname,
+                line = lineno,
+                "{}", message
+            );
+        }
+        "WARNING" => {
+            tracing::warn!(
+                target: "pyre::app",
+                worker = wid,
+                logger = %name,
+                file = %pathname,
+                line = lineno,
+                "{}", message
+            );
+        }
+        "ERROR" | "CRITICAL" => {
+            tracing::error!(
+                target: "pyre::app",
+                worker = wid,
+                logger = %name,
+                file = %pathname,
+                line = lineno,
+                "{}", message
+            );
+        }
+        _ => {
+            tracing::trace!(
+                target: "pyre::app",
+                worker = wid,
+                logger = %name,
+                file = %pathname,
+                line = lineno,
+                "{}", message
+            );
+        }
+    }
+
+    ffi::Py_INCREF(ffi::Py_None());
+    ffi::Py_None()
+}
+
+// ---------------------------------------------------------------------------
 // PyObjRef — RAII wrapper for *mut ffi::PyObject
 // ---------------------------------------------------------------------------
 
@@ -394,6 +518,29 @@ impl SubInterpreterWorker {
             PyObjRef::from_owned(ffi::PyDict_New()).ok_or("failed to create globals dict")?;
         let builtins = ffi::PyEval_GetBuiltins(); // borrowed ref
         ffi::PyDict_SetItemString(globals.as_ptr(), c"__builtins__".as_ptr(), builtins);
+
+        // Register _pyre_emit_log C-FFI function for Python logging bridge
+        #[allow(clippy::missing_transmute_annotations)]
+        let emit_log_def = Box::into_raw(Box::new(ffi::PyMethodDef {
+            ml_name: c"_pyre_emit_log".as_ptr(),
+            ml_meth: ffi::PyMethodDefPointer {
+                PyCFunctionWithKeywords: std::mem::transmute(
+                    pyre_emit_log_cfunc as *const (),
+                ),
+            },
+            ml_flags: ffi::METH_VARARGS,
+            ml_doc: std::ptr::null(),
+        }));
+        let emit_log_func =
+            ffi::PyCFunction_NewEx(emit_log_def, std::ptr::null_mut(), std::ptr::null_mut());
+        if !emit_log_func.is_null() {
+            ffi::PyDict_SetItemString(
+                globals.as_ptr(),
+                c"_pyre_emit_log".as_ptr(),
+                emit_log_func,
+            );
+            ffi::Py_DECREF(emit_log_func);
+        }
 
         // Set __file__ so user scripts can use it for path resolution
         if let Some(py_file) = py_str(script_path) {
@@ -1232,20 +1379,37 @@ fn worker_thread_loop(
             Err(_) => Err("internal error: worker panic".to_string()),
         };
 
-        // Log request if enabled
+        // Log request via tracing (zero-cost when access log is filtered off)
         if request_logging.load(Ordering::Relaxed) {
             let status = match &response {
                 Ok(r) => r.status,
                 Err(_) => 500,
             };
-            let tag = if status >= 500 {
-                "ERROR"
+            if status >= 500 {
+                tracing::error!(
+                    target: "pyre::access",
+                    method = %req.method,
+                    path = %req.path,
+                    status,
+                    "Request failed"
+                );
             } else if status >= 400 {
-                "WARN "
+                tracing::warn!(
+                    target: "pyre::access",
+                    method = %req.method,
+                    path = %req.path,
+                    status,
+                    "Client error"
+                );
             } else {
-                "INFO "
-            };
-            eprintln!("  [{tag}] {} {} → {status}", req.method, req.path);
+                tracing::info!(
+                    target: "pyre::access",
+                    method = %req.method,
+                    path = %req.path,
+                    status,
+                    "Request handled"
+                );
+            }
         }
 
         // Send response back (ignore error if receiver dropped)
@@ -1315,6 +1479,29 @@ fn worker_thread_loop_async(
         ffi::PyDict_SetItemString(worker.globals, c"_pyre_send".as_ptr(), send_func);
         ffi::Py_DECREF(recv_func);
         ffi::Py_DECREF(send_func);
+
+        // Register _pyre_emit_log for async worker logging bridge
+        #[allow(clippy::missing_transmute_annotations)]
+        let emit_log_def = Box::into_raw(Box::new(ffi::PyMethodDef {
+            ml_name: c"_pyre_emit_log".as_ptr(),
+            ml_meth: ffi::PyMethodDefPointer {
+                PyCFunctionWithKeywords: std::mem::transmute(
+                    pyre_emit_log_cfunc as *const (),
+                ),
+            },
+            ml_flags: ffi::METH_VARARGS,
+            ml_doc: std::ptr::null(),
+        }));
+        let emit_log_func =
+            ffi::PyCFunction_NewEx(emit_log_def, std::ptr::null_mut(), std::ptr::null_mut());
+        if !emit_log_func.is_null() {
+            ffi::PyDict_SetItemString(
+                worker.globals,
+                c"_pyre_emit_log".as_ptr(),
+                emit_log_func,
+            );
+            ffi::Py_DECREF(emit_log_func);
+        }
 
         // Run the async engine — this blocks until the channel is closed
         let code = std::ffi::CString::new(engine_script).unwrap();

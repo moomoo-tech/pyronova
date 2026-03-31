@@ -1,10 +1,13 @@
-"""Test: logging works in both GIL and sub-interpreter modes.
+"""Test: Pyre logging system — Rust tracing engine + Python bridge.
 
 Verifies:
-1. Framework enable_logging() produces structured output
-2. User print() visible in sub-interpreter
-3. User logging.info() visible in sub-interpreter
-4. Rust-level sub-interp request logging works
+1. Framework enable_logging() produces structured output (GIL mode)
+2. Rust-level sub-interp request logging works via tracing
+3. User print() visible in sub-interpreter
+4. User logging.info() routed through Rust tracing in sub-interpreter
+5. debug=True enables access log + tracing output
+6. JSON format output when configured
+7. Python logging bridge works in main interpreter
 """
 
 import subprocess
@@ -25,7 +28,7 @@ def run_server_and_check(script: str, label: str, expected_strings: list[str]):
     proc = subprocess.Popen(
         [PYTHON, script_path],
         stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        stderr=subprocess.PIPE,
         preexec_fn=os.setsid,
     )
     time.sleep(3)
@@ -38,9 +41,12 @@ def run_server_and_check(script: str, label: str, expected_strings: list[str]):
         pass
 
     time.sleep(1)
-    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-    stdout, _ = proc.communicate(timeout=5)
-    output = stdout.decode()
+    alive = proc.poll() is None
+    if alive:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    stdout, stderr = proc.communicate(timeout=5)
+    # Merge stdout + stderr — tracing writes to stderr, println to stdout
+    output = stdout.decode() + stderr.decode()
 
     passed = 0
     for s in expected_strings:
@@ -49,19 +55,19 @@ def run_server_and_check(script: str, label: str, expected_strings: list[str]):
             passed += 1
         else:
             print(f"  ❌ {label}: missing '{s}'")
-            print(f"     output: {output[:500]}")
+            print(f"     output: {output[:2000]}")
 
     return passed == len(expected_strings)
 
 
 def test_gil_mode_logging():
-    """Framework logging in GIL mode with timestamps."""
+    """Framework logging in GIL mode — Python hooks + tracing access log."""
     script = '''
 from pyreframework import Pyre
 app = Pyre()
 app.enable_logging()
 
-@app.get("/")
+@app.get("/", gil=True)
 def index(req): return "ok"
 
 app.run(host="127.0.0.1", port=9876)
@@ -69,12 +75,12 @@ app.run(host="127.0.0.1", port=9876)
     assert run_server_and_check(script, "gil_logging", [
         "[INFO ]",
         "GET /",
-        "→ 200",
+        "200",
     ])
 
 
 def test_subinterp_rust_logging():
-    """Rust-level request logging in sub-interpreter mode."""
+    """Rust-level request logging in sub-interpreter mode via tracing."""
     script = '''
 from pyreframework import Pyre
 app = Pyre()
@@ -86,9 +92,8 @@ def index(req): return "ok"
 app.run(host="127.0.0.1", port=9876, mode="subinterp")
 '''
     assert run_server_and_check(script, "subinterp_logging", [
-        "[INFO ]",
-        "GET /",
-        "200",
+        "pyre::access",
+        "Request handled",
     ])
 
 
@@ -111,14 +116,13 @@ app.run(host="127.0.0.1", port=9876, mode="subinterp")
 
 
 def test_user_logging_in_subinterp():
-    """Python logging module works in sub-interpreter handlers."""
+    """Python logging module routed through Rust tracing in sub-interpreter."""
     script = '''
 import logging
-logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger("test")
 
 from pyreframework import Pyre
-app = Pyre()
+app = Pyre(debug=True)
 
 @app.get("/")
 def index(req):
@@ -132,6 +136,81 @@ app.run(host="127.0.0.1", port=9876, mode="subinterp")
     ])
 
 
+def test_debug_mode_tracing():
+    """debug=True enables tracing output with access log."""
+    script = '''
+from pyreframework import Pyre
+app = Pyre(debug=True)
+
+@app.get("/")
+def index(req): return "ok"
+
+app.run(host="127.0.0.1", port=9876)
+'''
+    assert run_server_and_check(script, "debug_mode", [
+        "pyre::server",
+        "Pyre tracing engine initialized",
+        "Pyre started",
+    ])
+
+
+def test_debug_mode_access_log():
+    """debug=True produces access log with latency."""
+    script = '''
+from pyreframework import Pyre
+app = Pyre(debug=True)
+
+@app.get("/")
+def index(req): return "ok"
+
+app.run(host="127.0.0.1", port=9876)
+'''
+    assert run_server_and_check(script, "debug_access_log", [
+        "pyre::access",
+        "Request handled",
+        "latency_us",
+    ])
+
+
+def test_python_logging_bridge_main():
+    """Python logging in main interpreter routes through Rust tracing."""
+    script = '''
+import logging
+from pyreframework import Pyre
+
+app = Pyre(debug=True)
+logger = logging.getLogger("myapp")
+
+@app.get("/")
+def index(req):
+    logger.info("BRIDGE_TEST_MARKER")
+    return "ok"
+
+app.run(host="127.0.0.1", port=9876)
+'''
+    assert run_server_and_check(script, "python_bridge_main", [
+        "BRIDGE_TEST_MARKER",
+        "pyre::app",
+    ])
+
+
+def test_json_format():
+    """JSON format output when configured."""
+    script = '''
+from pyreframework import Pyre
+app = Pyre(debug=True, log_config={"format": "json"})
+
+@app.get("/")
+def index(req): return "ok"
+
+app.run(host="127.0.0.1", port=9876)
+'''
+    assert run_server_and_check(script, "json_format", [
+        '"target":"pyre::server"',
+        '"message":"Pyre tracing engine initialized"',
+    ])
+
+
 if __name__ == "__main__":
     print("=== Logging Tests ===")
     print()
@@ -142,5 +221,13 @@ if __name__ == "__main__":
     test_user_print_in_subinterp()
     print()
     test_user_logging_in_subinterp()
+    print()
+    test_debug_mode_tracing()
+    print()
+    test_debug_mode_access_log()
+    print()
+    test_python_logging_bridge_main()
+    print()
+    test_json_format()
     print()
     print("=== All logging tests passed ===")
