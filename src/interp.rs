@@ -812,9 +812,18 @@ impl SubInterpreterWorker {
             return Err("_PyreResponse class not available".to_string());
         }
 
-        // Convert body Vec<u8> to Python str (for _PyreResponse)
-        let body_str = String::from_utf8_lossy(&resp.body);
-        let py_body = py_str(&body_str).ok_or("failed to create body str")?;
+        // Convert body to Python object — use bytes for binary, str for text
+        let py_body = if resp.is_json || std::str::from_utf8(&resp.body).is_ok() {
+            let body_str = unsafe { std::str::from_utf8_unchecked(&resp.body) };
+            py_str(body_str).ok_or("failed to create body str")?
+        } else {
+            // Binary data: use PyBytes to avoid UTF-8 corruption
+            PyObjRef::from_owned(ffi::PyBytes_FromStringAndSize(
+                resp.body.as_ptr() as *const _,
+                resp.body.len() as isize,
+            ))
+            .ok_or("failed to create body bytes")?
+        };
         let py_status = PyObjRef::from_owned(ffi::PyLong_FromLong(resp.status as i64))
             .ok_or("failed to create status")?;
         let py_ct = match &resp.content_type {
@@ -960,6 +969,10 @@ impl SubInterpreterWorker {
                             {
                                 resp_headers.insert(k, v);
                             }
+                        } else {
+                            // Clear exception immediately — CPython requires clean
+                            // error state before calling any further C-API functions
+                            ffi::PyErr_Clear();
                         }
                     }
                 }
@@ -975,7 +988,21 @@ impl SubInterpreterWorker {
                     if ffi::PyDict_Check(a.as_ptr()) != 0 {
                         match self.json_dumps(a) {
                             Ok(s) => (s.into_bytes(), true),
-                            Err(_) => (Vec::new(), false),
+                            Err(e) => {
+                                tracing::error!(
+                                    target: "pyre::server",
+                                    error = %e,
+                                    "JSON serialization failed for response body dict"
+                                );
+                                let msg = format!(r#"{{"error":"json serialization failed: {}"}}"#, e);
+                                return Ok(SubInterpResponse {
+                                    body: msg.into_bytes(),
+                                    status: 500,
+                                    content_type: Some("application/json".to_string()),
+                                    headers: resp_headers,
+                                    is_json: true,
+                                });
+                            }
                         }
                     } else if ffi::PyBytes_Check(a.as_ptr()) != 0 {
                         // Raw bytes — pass through without UTF-8 conversion

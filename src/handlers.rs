@@ -423,27 +423,40 @@ pub(crate) async fn handle_request_subinterp(
             body_bytes,
         };
 
+        let routes_ref = Arc::clone(&routes);
         let handler_result = tokio::task::spawn_blocking(move || {
-            call_handler_with_hooks(routes, handler_idx, sky_req)
+            call_handler_with_hooks(routes_ref, handler_idx, sky_req)
         })
         .await
         .unwrap_or_else(|_| HandlerResult::Response(Err("handler thread panicked".to_string())));
 
-        let resp = match handler_result {
+        let mut resp = match handler_result {
             HandlerResult::Response(result) => full_body(build_response(result)?),
             HandlerResult::Stream(info) => build_stream_response(info),
         };
+        // Apply CORS to GIL-fallback routes (including SSE streams)
+        if let Some(origin) = routes.cors_origin.as_ref() {
+            let headers = resp.headers_mut();
+            headers.insert("access-control-allow-origin", origin.parse().unwrap());
+            headers.insert(
+                "access-control-allow-methods",
+                "GET, POST, PUT, DELETE, PATCH, OPTIONS".parse().unwrap(),
+            );
+            headers.insert("access-control-allow-headers", "*".parse().unwrap());
+        }
         let latency_us = start.elapsed().as_micros() as u64;
         let status = resp.status().as_u16();
-        tracing::info!(
-            target: "pyre::access",
-            method = %method_log,
-            path = %path_log,
-            status,
-            latency_us,
-            mode = "gil",
-            "Request handled"
-        );
+        if routes.request_logging {
+            tracing::info!(
+                target: "pyre::access",
+                method = %method_log,
+                path = %path_log,
+                status,
+                latency_us,
+                mode = "gil",
+                "Request handled"
+            );
+        }
         return Ok(resp);
     }
 
