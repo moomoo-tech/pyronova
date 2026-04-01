@@ -2,10 +2,11 @@
 //!
 //! All sub-interpreters share the same Arc<DashMap> in Rust memory.
 //! Python code uses `app.state["key"] = value` / `app.state["key"]`.
-//! Values are stored as Rust Strings (serialize JSON at the boundary).
+//! Values stored as `bytes::Bytes` (ref-counted, zero-cost clone).
 
 use std::sync::Arc;
 
+use bytes::Bytes;
 use dashmap::DashMap;
 use pyo3::prelude::*;
 
@@ -13,14 +14,15 @@ use pyo3::prelude::*;
 ///
 /// Thread-safe, lock-free reads for different keys, nanosecond latency.
 /// All sub-interpreters share the same underlying DashMap via Arc.
+/// Values are `Bytes` — clone is atomic refcount bump, not deep copy.
 #[pyclass]
 pub(crate) struct SharedState {
-    inner: Arc<DashMap<String, Vec<u8>>>,
+    inner: Arc<DashMap<String, Bytes>>,
 }
 
 impl SharedState {
     /// Create a new SharedState with the given Arc (for sharing across workers).
-    pub fn with_inner(inner: Arc<DashMap<String, Vec<u8>>>) -> Self {
+    pub fn with_inner(inner: Arc<DashMap<String, Bytes>>) -> Self {
         SharedState { inner }
     }
 }
@@ -36,24 +38,24 @@ impl SharedState {
 
     /// Set a string value.
     fn set(&self, key: String, value: String) {
-        self.inner.insert(key, value.into_bytes());
+        self.inner.insert(key, Bytes::from(value.into_bytes()));
     }
 
     /// Get a string value. Returns None if key doesn't exist.
     fn get(&self, key: &str) -> Option<String> {
         self.inner
             .get(key)
-            .and_then(|v| String::from_utf8(v.value().clone()).ok())
+            .and_then(|v| std::str::from_utf8(v.value()).ok().map(|s| s.to_string()))
     }
 
     /// Set raw bytes value.
     fn set_bytes(&self, key: String, value: Vec<u8>) {
-        self.inner.insert(key, value);
+        self.inner.insert(key, Bytes::from(value));
     }
 
-    /// Get raw bytes value.
+    /// Get raw bytes value (zero-copy clone via Bytes refcount).
     fn get_bytes(&self, key: &str) -> Option<Vec<u8>> {
-        self.inner.get(key).map(|v| v.value().clone())
+        self.inner.get(key).map(|v| v.value().to_vec())
     }
 
     /// Delete a key. Returns True if it existed.

@@ -11,6 +11,46 @@ use tokio::net::TcpListener;
 use tokio::runtime::Builder as RuntimeBuilder;
 use tokio::signal;
 
+/// Create a TCP listener with SO_REUSEPORT (kernel load-balanced accept)
+/// and a large backlog (8192) to avoid SYN drops under extreme load.
+fn create_reuseport_listener(addr: SocketAddr) -> Result<std::net::TcpListener, String> {
+    use socket2::{Domain, Protocol, Socket, Type};
+
+    let domain = if addr.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
+    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))
+        .map_err(|e| format!("socket creation error: {e}"))?;
+
+    socket
+        .set_reuse_address(true)
+        .map_err(|e| format!("set_reuse_address error: {e}"))?;
+
+    // SO_REUSEPORT: allows multiple listeners on the same port.
+    // Kernel distributes incoming connections across all listeners.
+    #[cfg(not(windows))]
+    socket
+        .set_reuse_port(true)
+        .map_err(|e| format!("set_reuse_port error: {e}"))?;
+
+    socket
+        .set_nonblocking(true)
+        .map_err(|e| format!("set_nonblocking error: {e}"))?;
+
+    socket
+        .bind(&addr.into())
+        .map_err(|e| format!("bind error: {e}"))?;
+
+    // Large backlog to avoid SYN drops at 200k+ QPS.
+    socket
+        .listen(8192)
+        .map_err(|e| format!("listen error: {e}"))?;
+
+    Ok(socket.into())
+}
+
 use crate::handlers::{handle_request, handle_request_subinterp};
 use crate::interp;
 use crate::router::{FrozenRoutes, MutableRoutes, RouteTable};
@@ -21,7 +61,7 @@ use crate::websocket;
 pub(crate) struct PyreApp {
     routes: MutableRoutes,
     script_path: Option<String>,
-    shared_state: Arc<dashmap::DashMap<String, Vec<u8>>>,
+    shared_state: Arc<dashmap::DashMap<String, bytes::Bytes>>,
     /// Per-instance CORS origin (None = disabled).
     cors_origin: Option<String>,
     /// Per-instance request logging flag.
@@ -277,8 +317,11 @@ impl PyreApp {
                 })?;
 
             rt.block_on(async move {
-                let listener = TcpListener::bind(addr).await.map_err(|e| {
-                    pyo3::exceptions::PyOSError::new_err(format!("bind error: {e}"))
+                let std_listener = create_reuseport_listener(addr).map_err(|e| {
+                    pyo3::exceptions::PyOSError::new_err(e)
+                })?;
+                let listener = TcpListener::from_std(std_listener).map_err(|e| {
+                    pyo3::exceptions::PyOSError::new_err(format!("TcpListener::from_std error: {e}"))
                 })?;
 
                 let shutdown = async {
@@ -435,8 +478,11 @@ impl PyreApp {
                 })?;
 
             rt.block_on(async move {
-                let listener = TcpListener::bind(addr).await.map_err(|e| {
-                    pyo3::exceptions::PyOSError::new_err(format!("bind error: {e}"))
+                let std_listener = create_reuseport_listener(addr).map_err(|e| {
+                    pyo3::exceptions::PyOSError::new_err(e)
+                })?;
+                let listener = TcpListener::from_std(std_listener).map_err(|e| {
+                    pyo3::exceptions::PyOSError::new_err(format!("TcpListener::from_std error: {e}"))
                 })?;
 
                 let shutdown = async {
