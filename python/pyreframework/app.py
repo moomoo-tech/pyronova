@@ -73,9 +73,13 @@ def _setup_python_logging_bridge(rust_level: str = "DEBUG") -> None:
                     pathname=record.pathname or "",
                     lineno=record.lineno or 0,
                 )
-            except Exception:
-                # Never let logging bridge errors crash business logic
-                pass
+            except Exception as exc:
+                # Fallback to stderr — never silently swallow log messages
+                import sys
+                try:
+                    sys.stderr.write(f"[pyre] log bridge error: {exc} | original: {record.getMessage()}\n")
+                except Exception:
+                    pass  # Last resort: truly nothing we can do
 
     root = logging.getLogger()
     root.handlers.clear()
@@ -653,6 +657,7 @@ class Pyre:
                     watch_dir,
                     watch_filter=watchfiles.PythonFilter(),
                     stop_event=None,
+                    debounce=500,  # 500ms debounce — wait for IDE to finish writing
                 ):
                     changed = [os.path.basename(c[1]) for c in list(changes)[:3]]
                     print(f"\n  [reload] File changed: {', '.join(changed)}")
@@ -701,7 +706,10 @@ class Pyre:
                     time.sleep(1)
                     current = _snapshot()
                     if current != snap:
-                        changed = [f for f in current if current.get(f) != snap.get(f)]
+                        # Debounce: wait 0.5s for IDE to finish writing all files
+                        time.sleep(0.5)
+                        snap = _snapshot()  # Re-snapshot after debounce
+                        changed = [f for f in snap if snap.get(f) != current.get(f)]
                         print(f"\n  [reload] File changed: {', '.join(os.path.basename(f) for f in changed[:3])}")
                         print(f"  [reload] Restarting...\n")
                         proc.terminate()

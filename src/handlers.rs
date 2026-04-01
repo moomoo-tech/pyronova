@@ -127,9 +127,16 @@ pub(crate) async fn handle_request(
 
     use http_body_util::Limited;
     let limited = Limited::new(req.into_body(), max_body_size());
-    let body_bytes = match limited.collect().await {
-        Ok(c) => c.to_bytes(),
-        Err(_) => return Ok(full_body(payload_too_large_response())),
+    // Timeout body read to defend against Slowloris attacks
+    let body_bytes = match tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        limited.collect(),
+    )
+    .await
+    {
+        Ok(Ok(c)) => c.to_bytes(),
+        Ok(Err(_)) => return Ok(full_body(payload_too_large_response())),
+        Err(_) => return Ok(full_body(crate::response::gateway_timeout_response())),
     };
 
     let lookup = routes.lookup(&method, &path);
@@ -372,9 +379,15 @@ pub(crate) async fn handle_request_subinterp(
 
     use http_body_util::Limited;
     let limited = Limited::new(req.into_body(), max_body_size());
-    let body_bytes = match limited.collect().await {
-        Ok(c) => c.to_bytes(),
-        Err(_) => return Ok(full_body(payload_too_large_response())),
+    let body_bytes = match tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        limited.collect(),
+    )
+    .await
+    {
+        Ok(Ok(c)) => c.to_bytes(),
+        Ok(Err(_)) => return Ok(full_body(payload_too_large_response())),
+        Err(_) => return Ok(full_body(crate::response::gateway_timeout_response())),
     };
 
     let lookup = pool.lookup(&method, &path);

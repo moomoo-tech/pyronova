@@ -67,16 +67,14 @@ unsafe extern "C" fn pyre_recv_cfunc(
     match req_opt {
         Some(req) => {
             let req_id = state.next_req_id.fetch_add(1, Ordering::Relaxed);
-            state
-                .response_map
-                .lock()
-                .unwrap()
-                .insert(req_id, req.response_tx);
 
-            // Build params and headers as PyDict directly (avoid JSON round-trip)
+            // Build ALL Python objects BEFORE inserting response_tx into map.
+            // If any allocation fails, response_tx drops → sender gets error
+            // instead of leaking in response_map and causing 504 timeout.
             let py_params = py_str_dict_from_vec(&req.params);
             let py_headers = py_str_dict(&req.headers);
             if py_params.is_none() || py_headers.is_none() {
+                // response_tx not inserted → dropped → oneshot Err on Tokio side
                 ffi::Py_INCREF(ffi::Py_None());
                 return ffi::Py_None();
             }
@@ -89,6 +87,14 @@ unsafe extern "C" fn pyre_recv_cfunc(
                 ffi::Py_INCREF(ffi::Py_None());
                 return ffi::Py_None();
             }
+
+            // All Python objects built successfully — NOW insert response_tx
+            state
+                .response_map
+                .lock()
+                .unwrap()
+                .insert(req_id, req.response_tx);
+
             ffi::PyTuple_SetItem(tuple, 0, ffi::PyLong_FromUnsignedLongLong(req_id));
             ffi::PyTuple_SetItem(
                 tuple,
@@ -387,12 +393,16 @@ impl Drop for PyObjRef {
         if !self.ptr.is_null() {
             unsafe {
                 // SAFETY: Py_DECREF requires the GIL to be held.
-                // This assertion catches accidental drops from non-GIL threads
-                // (e.g. Tokio async tasks) during development.
-                debug_assert!(
-                    ffi::PyGILState_Check() == 1,
-                    "PyObjRef dropped without holding the GIL — this is a use-after-free bug"
-                );
+                // Runtime check in ALL build modes — debug_assert is stripped in release.
+                // If GIL is not held, log and leak the pointer rather than segfault.
+                if ffi::PyGILState_Check() != 1 {
+                    tracing::error!(
+                        target: "pyre::server",
+                        ptr = ?self.ptr,
+                        "PyObjRef dropped without GIL — leaking pointer to avoid segfault"
+                    );
+                    return; // Leak is better than crash
+                }
                 ffi::Py_DECREF(self.ptr);
             }
         }
