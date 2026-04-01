@@ -78,8 +78,10 @@ def _setup_python_logging_bridge(rust_level: str = "DEBUG") -> None:
                 self.handleError(record)
 
     root = logging.getLogger()
-    root.handlers.clear()
-    root.addHandler(PyreRustHandler())
+    # Don't clear existing handlers — user may have Sentry, DataDog, etc.
+    # Only add Pyre bridge if not already present.
+    if not any(isinstance(h, PyreRustHandler) for h in root.handlers):
+        root.addHandler(PyreRustHandler())
     # Sync Python's level gate with Rust's EnvFilter — avoids wasted
     # getMessage() + FFI calls for records that Rust would discard anyway
     root.setLevel(_LEVEL_MAP.get(rust_level.upper(), logging.DEBUG))
@@ -210,23 +212,34 @@ class Pyre:
             import inspect
             sig = inspect.signature(fn)
             params = list(sig.parameters.values())
+            is_async = inspect.iscoroutinefunction(fn)
 
-            def wrapper(req):
-                # Parse and validate JSON body → Pydantic model
-                try:
-                    validated = mdl.model_validate_json(req.body)
-                except Exception as e:
-                    # Return 422 Unprocessable Entity with validation errors
-                    return PyreResponse(
-                        body=str(e),
-                        status_code=422,
-                        content_type="text/plain",
-                    )
-                # If handler accepts 2 args (req, data), pass both
-                if len(params) >= 2:
-                    return fn(req, validated)
-                # Otherwise just pass validated data
-                return fn(validated)
+            if is_async:
+                async def wrapper(req):
+                    try:
+                        validated = mdl.model_validate_json(req.body)
+                    except Exception as e:
+                        return PyreResponse(
+                            body=str(e),
+                            status_code=422,
+                            content_type="text/plain",
+                        )
+                    if len(params) >= 2:
+                        return await fn(req, validated)
+                    return await fn(validated)
+            else:
+                def wrapper(req):
+                    try:
+                        validated = mdl.model_validate_json(req.body)
+                    except Exception as e:
+                        return PyreResponse(
+                            body=str(e),
+                            status_code=422,
+                            content_type="text/plain",
+                        )
+                    if len(params) >= 2:
+                        return fn(req, validated)
+                    return fn(validated)
 
             wrapper.__name__ = fn.__name__
             wrapper.__qualname__ = fn.__qualname__
@@ -296,19 +309,10 @@ class Pyre:
                 return PyreResponse(body="", status_code=204, headers=cors_headers)
             return None
 
-        def _cors_after(req, resp):
-            merged = {**getattr(resp, "headers", {}), **cors_headers}
-            return PyreResponse(
-                body=resp.body,
-                status_code=resp.status_code,
-                content_type=resp.content_type,
-                headers=merged,
-            )
-
         self._engine.before_request(_cors_before)
-        self._engine.after_request(_cors_after)
 
-        # Also set Rust-level CORS for sub-interpreter mode (per-instance)
+        # CORS response headers are applied in Rust layer only (handlers.rs)
+        # to avoid duplicate headers which violate W3C CORS spec.
         self._engine.set_cors_origin(allow_origins)
 
     # ------------------------------------------------------------------
@@ -479,9 +483,12 @@ class Pyre:
         from datetime import datetime
 
         _timings: dict[int, float] = {}
+        _MAX_TIMINGS = 10000  # Cap to prevent memory leak from SSE/stream requests
         _min_level = {"debug": 0, "info": 1, "warn": 2, "error": 3}.get(level.lower(), 1)
 
         def _log_before(req):
+            if len(_timings) > _MAX_TIMINGS:
+                _timings.clear()  # Emergency cleanup — stream requests skip after_hook
             _timings[id(req)] = time.monotonic()
             return None
 

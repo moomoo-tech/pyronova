@@ -456,6 +456,7 @@ pub(crate) unsafe fn pyobj_to_string(obj: *mut ffi::PyObject) -> Result<String, 
     let mut size: isize = 0;
     let ptr = ffi::PyUnicode_AsUTF8AndSize(obj, &mut size);
     if ptr.is_null() {
+        ffi::PyErr_Clear(); // Must clear exception before any further C-API calls
         return Err("failed to extract string".to_string());
     }
     let bytes = std::slice::from_raw_parts(ptr as *const u8, size as usize);
@@ -1432,6 +1433,12 @@ fn worker_thread_loop(
     request_logging: &AtomicBool,
 ) {
     while let Ok(req) = rx.recv() {
+        // Skip requests whose caller already timed out (504) — avoid wasting
+        // CPU on "dead" requests during queue backlog (prevents snowball effect).
+        if req.response_tx.is_closed() {
+            continue;
+        }
+
         // Cell lives outside catch_unwind so the guard can write tstate back
         // even during panic unwind.
         let tstate_cell = std::cell::Cell::new(worker.tstate);

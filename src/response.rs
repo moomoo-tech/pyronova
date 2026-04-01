@@ -136,7 +136,9 @@ pub(crate) fn build_response(
             for (k, v) in &data.headers {
                 builder = builder.header(k.as_str(), v.as_str());
             }
-            Ok(builder.body(Full::new(data.body)).unwrap())
+            Ok(builder
+                .body(Full::new(data.body))
+                .unwrap_or_else(|_| error_response("invalid response headers")))
         }
         Err(e) => Ok(error_response(&e)),
     }

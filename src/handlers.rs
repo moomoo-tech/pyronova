@@ -142,7 +142,7 @@ pub(crate) async fn handle_request(
     let lookup = routes.lookup(&method, &path);
     let has_fallback = routes.fallback_handler.is_some();
 
-    if lookup.is_none() {
+    if lookup.is_none() && (method.as_ref() == "GET" || method.as_ref() == "HEAD") {
         if let Some(resp) = try_static_file(&path, &routes.static_dirs).await {
             return Ok(full_body(resp));
         }
@@ -355,7 +355,9 @@ fn build_stream_response(info: StreamInfo) -> Response<BoxBody> {
     for (k, v) in &info.headers {
         builder = builder.header(k.as_str(), v.as_str());
     }
-    builder.body(boxed).unwrap()
+    builder
+        .body(boxed)
+        .unwrap_or_else(|_| Response::new(BoxBody::default()))
 }
 
 // ---------------------------------------------------------------------------
@@ -393,7 +395,7 @@ pub(crate) async fn handle_request_subinterp(
     let lookup = pool.lookup(&method, &path);
     let has_fallback = routes.fallback_handler.is_some();
 
-    if lookup.is_none() {
+    if lookup.is_none() && (method.as_ref() == "GET" || method.as_ref() == "HEAD") {
         if let Some(resp) = try_static_file(&path, &pool.static_dirs).await {
             return Ok(full_body(resp));
         }
@@ -517,7 +519,10 @@ pub(crate) async fn handle_request_subinterp(
                 );
                 builder = builder.header("access-control-allow-headers", "*");
             }
-            full_body(builder.body(Full::new(Bytes::from(resp.body))).unwrap())
+            match builder.body(Full::new(Bytes::from(resp.body))) {
+                Ok(r) => full_body(r),
+                Err(_) => full_body(error_response("invalid response headers")),
+            }
         }
         Err(e) => full_body(error_response(&e)),
     };
