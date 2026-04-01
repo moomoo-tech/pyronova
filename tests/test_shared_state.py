@@ -56,3 +56,40 @@ def fast_route(req):
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=8000, mode="subinterp")
+
+
+# ---------------------------------------------------------------------------
+# Unit tests for SharedState atomic operations (incr/decr)
+# ---------------------------------------------------------------------------
+
+from pyreframework.engine import SharedState
+
+
+def test_incr_creates_key():
+    s = SharedState()
+    assert s.incr("x", 1) == 1
+
+
+def test_incr_accumulates():
+    s = SharedState()
+    s.incr("a", 1)
+    s.incr("a", 1)
+    assert s.incr("a", 1) == 3
+
+
+def test_decr():
+    s = SharedState()
+    s.incr("b", 5)
+    assert s.decr("b", 2) == 3
+
+
+def test_incr_by_amount():
+    s = SharedState()
+    assert s.incr("c", 10) == 10
+    assert s.incr("c", 5) == 15
+
+
+def test_incr_result_is_string_in_get():
+    s = SharedState()
+    s.incr("d", 42)
+    assert s.get("d") == "42"

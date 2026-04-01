@@ -88,3 +88,9 @@ def test_api_still_works(client):
     """API routes coexist with static files."""
     resp = client.get("/")
     assert resp.json()["api"] is True
+
+
+def test_post_static_file_rejected(client):
+    """POST to static file should return 404 (only GET/HEAD allowed)."""
+    resp = client.post("/static/index.html")
+    assert resp.status_code == 404

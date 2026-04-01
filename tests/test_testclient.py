@@ -94,3 +94,52 @@ def test_custom_headers(client):
 def test_404(client):
     resp = client.get("/nonexistent")
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# CORS and binary data regression tests
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def cors_client():
+    app = Pyre()
+    app.enable_cors()
+
+    @app.get("/")
+    def index(req):
+        return {"ok": True}
+
+    @app.get("/binary")
+    def binary(req):
+        return PyreResponse(
+            body=b"\xff\xd8\xff\xe0\x00\x10JFIF",
+            content_type="image/jpeg",
+        )
+
+    c = TestClient(app, port=19878)
+    yield c
+    c.close()
+
+
+def test_cors_on_normal_response(cors_client):
+    resp = cors_client.get("/")
+    assert resp.status_code == 200
+    headers_lower = {k.lower(): v for k, v in resp.headers.items()}
+    assert "access-control-allow-origin" in headers_lower
+
+
+def test_cors_no_duplicates(cors_client):
+    """CORS headers should not be duplicated (W3C spec violation)."""
+    resp = cors_client.get("/")
+    # Count occurrences of access-control-allow-origin
+    cors_count = sum(
+        1 for k in resp.headers if k.lower() == "access-control-allow-origin"
+    )
+    assert cors_count <= 1, f"Duplicate CORS headers: {cors_count}"
+
+
+def test_binary_response_preserved(cors_client):
+    """Binary data must not be corrupted by UTF-8 lossy conversion."""
+    resp = cors_client.get("/binary")
+    assert resp.status_code == 200
+    assert resp.body[:2] == b"\xff\xd8", f"JPEG magic bytes corrupted: {resp.body[:4]}"
