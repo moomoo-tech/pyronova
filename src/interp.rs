@@ -84,6 +84,11 @@ unsafe extern "C" fn pyre_recv_cfunc(
             let py_headers = py_headers.unwrap();
 
             let tuple = ffi::PyTuple_New(9);
+            if tuple.is_null() {
+                ffi::PyErr_Clear();
+                ffi::Py_INCREF(ffi::Py_None());
+                return ffi::Py_None();
+            }
             ffi::PyTuple_SetItem(tuple, 0, ffi::PyLong_FromUnsignedLongLong(req_id));
             ffi::PyTuple_SetItem(
                 tuple,
@@ -156,10 +161,10 @@ unsafe extern "C" fn pyre_send_cfunc(
     let mut body_ptr: *const std::os::raw::c_char = std::ptr::null();
     let mut body_len: isize = 0;
 
-    // n=isize, K=u64, H=u16, s=str, y#=bytes+len
+    // n=isize, K=u64, H=u16, z=str|None, y#=bytes+len
     if ffi::PyArg_ParseTuple(
         args,
-        c"nKHsy#".as_ptr(),
+        c"nKHzy#".as_ptr(),
         &mut worker_id,
         &mut req_id,
         &mut status,
@@ -227,7 +232,7 @@ unsafe extern "C" fn pyre_emit_log_cfunc(
     // Parse: (str, str, str, str, int, int)
     if ffi::PyArg_ParseTuple(
         args,
-        c"ssssin".as_ptr(),
+        c"zzzzin".as_ptr(),
         &mut level_ptr,
         &mut name_ptr,
         &mut msg_ptr,
@@ -574,6 +579,8 @@ impl SubInterpreterWorker {
         if result.is_none() {
             ffi::PyErr_Print();
             // globals dropped here → DECREF
+            // Destroy the orphaned sub-interpreter to avoid memory leak
+            ffi::Py_EndInterpreter(ffi::PyThreadState_Get());
             ffi::PyThreadState_Swap(main_tstate);
             return Err("failed to execute script in sub-interpreter".to_string());
         }
@@ -775,7 +782,10 @@ impl SubInterpreterWorker {
         }
 
         // fallback: str(result)
-        let str_obj = PyObjRef::from_owned(ffi::PyObject_Str(ptr)).ok_or("str() failed")?;
+        let str_obj = PyObjRef::from_owned(ffi::PyObject_Str(ptr)).ok_or_else(|| {
+            ffi::PyErr_Clear();
+            "str() failed".to_string()
+        })?;
         let s = pyobj_to_string(str_obj.as_ptr())?;
         Ok(SubInterpResponse {
             body: s.into_bytes(),
@@ -892,7 +902,15 @@ impl SubInterpreterWorker {
             let attr =
                 PyObjRef::from_owned(ffi::PyObject_GetAttrString(ptr, c"status_code".as_ptr()));
             match attr {
-                Some(a) => ffi::PyLong_AsLong(a.as_ptr()) as u16,
+                Some(a) => {
+                    let code = ffi::PyLong_AsLong(a.as_ptr());
+                    if code == -1 && !ffi::PyErr_Occurred().is_null() {
+                        ffi::PyErr_Clear();
+                        200
+                    } else {
+                        code as u16
+                    }
+                }
                 None => {
                     ffi::PyErr_Clear();
                     200
@@ -1049,12 +1067,17 @@ impl SubInterpreterWorker {
 
         // Call handler(request)
         // If we have after_request hooks, keep an extra ref to request_obj
-        // to avoid rebuilding it (saves ~1-3μs per request with hooks).
+        // wrapped in RAII immediately so early `?` returns auto-DECREF.
         let has_after_hooks = !after_hook_names.is_empty();
-        if has_after_hooks {
+        let req_for_hooks = if has_after_hooks {
             ffi::Py_INCREF(request_obj.as_ptr());
-        }
-        let req_ptr_for_hooks = request_obj.as_ptr();
+            Some(
+                PyObjRef::from_owned(request_obj.as_ptr())
+                    .ok_or("null request for hooks")?,
+            )
+        } else {
+            None
+        };
 
         let call_args =
             PyObjRef::from_owned(ffi::PyTuple_New(1)).ok_or("failed to create call args")?;
@@ -1073,20 +1096,15 @@ impl SubInterpreterWorker {
                 self.parse_result(resolved)?
             }
             None => {
-                if has_after_hooks {
-                    ffi::Py_DECREF(req_ptr_for_hooks);
-                }
+                // req_for_hooks dropped here automatically → DECREF
                 ffi::PyErr_Print();
                 return Err("handler raised an exception".to_string());
             }
         };
 
         // Run after_request hooks: hook(request, response) → response
-        // Reuses the original request object (extra INCREF above) instead of rebuilding.
-        if has_after_hooks {
-            // Wrap the extra ref as owned PyObjRef (INCREF was done above)
-            let req_for_hooks = PyObjRef::from_owned(req_ptr_for_hooks)
-                .ok_or("null request for hooks")?;
+        // Reuses the original request object (RAII guard created above).
+        if let Some(ref req_for_hooks) = req_for_hooks {
 
             for hook_name in after_hook_names {
                 if let Some(&hook_func) = self.handlers.get(hook_name) {
@@ -1214,8 +1232,8 @@ impl InterpreterPool {
 
         // Determine worker split: if async handlers exist, split workers
         let (sync_count, _async_count) = if has_any_async {
-            let async_n = (n / 2).max(2); // At least 2 async workers
-            (n - async_n, async_n)
+            let async_n = (n / 2).max(1).min(n); // At least 1, never exceed total
+            (n.saturating_sub(async_n), async_n)
         } else {
             (n, 0)
         };

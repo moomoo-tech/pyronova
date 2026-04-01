@@ -19,6 +19,8 @@ pub(crate) struct RouteTable {
     pub(crate) fallback_handler: Option<Py<PyAny>>,
     pub(crate) fallback_handler_name: Option<String>,
     pub(crate) static_dirs: Vec<(String, String)>,
+    pub(crate) cors_origin: Option<String>,
+    pub(crate) request_logging: bool,
 }
 
 impl RouteTable {
@@ -37,6 +39,8 @@ impl RouteTable {
             fallback_handler: None,
             fallback_handler_name: None,
             static_dirs: Vec::new(),
+            cors_origin: None,
+            request_logging: false,
         }
     }
 

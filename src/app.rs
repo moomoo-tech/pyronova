@@ -276,6 +276,8 @@ impl PyreApp {
                 fallback_handler: table.fallback_handler.as_ref().map(|h| h.clone_ref(py)),
                 fallback_handler_name: table.fallback_handler_name.clone(),
                 static_dirs: table.static_dirs.clone(),
+                cors_origin: self.cors_origin.clone(),
+                request_logging: self.request_logging,
             })
         };
 
