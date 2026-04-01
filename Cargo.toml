@@ -33,3 +33,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 socket2 = { version = "0.5", features = ["all"] }
 libc = "0.2"
 pythonize = "0.28"
+
+[profile.release]
+lto = "fat"            # Cross-crate inlining: LLVM optimizes across hyper/tokio/pyo3 boundaries
+codegen-units = 1      # Single codegen unit: max optimization at cost of compile time
+opt-level = 3          # Aggressive optimization
+strip = true           # Strip symbols: smaller binary, better icache
