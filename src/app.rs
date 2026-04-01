@@ -11,6 +11,26 @@ use tokio::net::TcpListener;
 use tokio::runtime::Builder as RuntimeBuilder;
 use tokio::signal;
 
+/// Enable TCP_QUICKACK on a stream (Linux only, no-op elsewhere).
+#[allow(unused_variables)]
+fn setup_tcp_quickack(stream: &tokio::net::TcpStream) {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = stream.as_raw_fd();
+        let val: libc::c_int = 1;
+        unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_TCP,
+                libc::TCP_QUICKACK,
+                &val as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&val) as libc::socklen_t,
+            );
+        }
+    }
+}
+
 /// Create a TCP listener with SO_REUSEPORT (kernel load-balanced accept)
 /// and a large backlog (8192) to avoid SYN drops under extreme load.
 fn create_reuseport_listener(addr: SocketAddr) -> Result<std::net::TcpListener, String> {
@@ -317,80 +337,74 @@ impl PyreApp {
                 })?;
 
             rt.block_on(async move {
-                let std_listener = create_reuseport_listener(addr).map_err(|e| {
-                    pyo3::exceptions::PyOSError::new_err(e)
-                })?;
-                let listener = TcpListener::from_std(std_listener).map_err(|e| {
-                    pyo3::exceptions::PyOSError::new_err(format!("TcpListener::from_std error: {e}"))
-                })?;
+                // Multi-accept: N listeners on same port via SO_REUSEPORT.
+                // Linux kernel load-balances connections across accept loops.
+                // macOS SO_REUSEPORT doesn't do kernel LB, so use 1 acceptor.
+                #[cfg(target_os = "linux")]
+                let n_accept = workers.min(num_cpus);
+                #[cfg(not(target_os = "linux"))]
+                let n_accept = 1;
+                let shutdown_token = tokio_util::sync::CancellationToken::new();
 
-                let shutdown = async {
-                    signal::ctrl_c().await.ok();
-                    tracing::info!(target: "pyre::server", "Shutting down gracefully...");
-                    println!("\n  Shutting down gracefully...");
-                };
-                tokio::pin!(shutdown);
+                for _ in 0..n_accept {
+                    let std_listener = create_reuseport_listener(addr).map_err(|e| {
+                        pyo3::exceptions::PyOSError::new_err(e)
+                    })?;
+                    let listener = TcpListener::from_std(std_listener).map_err(|e| {
+                        pyo3::exceptions::PyOSError::new_err(format!("TcpListener::from_std error: {e}"))
+                    })?;
+                    let routes = Arc::clone(&routes);
+                    let token = shutdown_token.clone();
 
-                loop {
-                    tokio::select! {
-                        result = listener.accept() => {
-                            let (stream, remote_addr) = result.map_err(|e| {
-                                pyo3::exceptions::PyOSError::new_err(format!("accept error: {e}"))
-                            })?;
-
-                            let routes = Arc::clone(&routes);
-                            let _ = stream.set_nodelay(true);
-                            // TCP_QUICKACK: disable delayed ACK (Linux only).
-                            // Shaves ~40ms off request-response round trips.
-                            #[cfg(target_os = "linux")]
-                            {
-                                use std::os::unix::io::AsRawFd;
-                                let fd = stream.as_raw_fd();
-                                let val: libc::c_int = 1;
-                                unsafe {
-                                    libc::setsockopt(
-                                        fd,
-                                        libc::SOL_TCP,
-                                        libc::TCP_QUICKACK,
-                                        &val as *const _ as *const libc::c_void,
-                                        std::mem::size_of_val(&val) as libc::socklen_t,
-                                    );
-                                }
-                            }
-                            let io = TokioIo::new(stream);
-
-                            tokio::spawn(async move {
-                                let svc = service_fn(move |req: Request<Incoming>| {
+                    tokio::spawn(async move {
+                        loop {
+                            tokio::select! {
+                                result = listener.accept() => {
+                                    let (stream, remote_addr) = match result {
+                                        Ok(v) => v,
+                                        Err(_) => continue,
+                                    };
                                     let routes = Arc::clone(&routes);
-                                    let client_ip_addr = remote_addr.ip();
-                                    async move {
-                                        if websocket::is_websocket_upgrade(&req) {
-                                            websocket::handle_websocket(req, routes).await
-                                        } else {
-                                            handle_request(req, routes, client_ip_addr).await
-                                        }
-                                    }
-                                });
+                                    let _ = stream.set_nodelay(true);
+                                    setup_tcp_quickack(&stream);
+                                    let io = TokioIo::new(stream);
 
-                                if let Err(e) = AutoBuilder::new(hyper_util::rt::TokioExecutor::new())
-                                    .serve_connection_with_upgrades(io, svc)
-                                    .await
-                                {
-                                    let msg = e.to_string();
-                                    if !msg.contains("connection closed")
-                                        && !msg.contains("reset by peer")
-                                        && !msg.contains("broken pipe")
-                                    {
-                                        tracing::warn!(target: "pyre::server", error = %e, "Connection error");
-                                    }
+                                    tokio::spawn(async move {
+                                        let svc = service_fn(move |req: Request<Incoming>| {
+                                            let routes = Arc::clone(&routes);
+                                            let client_ip_addr = remote_addr.ip();
+                                            async move {
+                                                if websocket::is_websocket_upgrade(&req) {
+                                                    websocket::handle_websocket(req, routes).await
+                                                } else {
+                                                    handle_request(req, routes, client_ip_addr).await
+                                                }
+                                            }
+                                        });
+                                        if let Err(e) = AutoBuilder::new(hyper_util::rt::TokioExecutor::new())
+                                            .serve_connection_with_upgrades(io, svc)
+                                            .await
+                                        {
+                                            let msg = e.to_string();
+                                            if !msg.contains("connection closed")
+                                                && !msg.contains("reset by peer")
+                                                && !msg.contains("broken pipe")
+                                            {
+                                                tracing::warn!(target: "pyre::server", error = %e, "Connection error");
+                                            }
+                                        }
+                                    });
                                 }
-                            });
+                                _ = token.cancelled() => break,
+                            }
                         }
-                        _ = &mut shutdown => {
-                            break;
-                        }
-                    }
+                    });
                 }
+
+                signal::ctrl_c().await.ok();
+                tracing::info!(target: "pyre::server", "Shutting down gracefully...");
+                println!("\n  Shutting down gracefully...");
+                shutdown_token.cancel();
 
                 Ok(())
             })
@@ -495,82 +509,74 @@ impl PyreApp {
                 })?;
 
             rt.block_on(async move {
-                let std_listener = create_reuseport_listener(addr).map_err(|e| {
-                    pyo3::exceptions::PyOSError::new_err(e)
-                })?;
-                let listener = TcpListener::from_std(std_listener).map_err(|e| {
-                    pyo3::exceptions::PyOSError::new_err(format!("TcpListener::from_std error: {e}"))
-                })?;
+                #[cfg(target_os = "linux")]
+                let n_accept = workers.min(num_cpus);
+                #[cfg(not(target_os = "linux"))]
+                let n_accept = 1;
+                let shutdown_token = tokio_util::sync::CancellationToken::new();
 
-                let shutdown = async {
-                    signal::ctrl_c().await.ok();
-                    tracing::info!(target: "pyre::server", "Shutting down gracefully...");
-                    println!("\n  Shutting down gracefully...");
-                };
-                tokio::pin!(shutdown);
+                for _ in 0..n_accept {
+                    let std_listener = create_reuseport_listener(addr).map_err(|e| {
+                        pyo3::exceptions::PyOSError::new_err(e)
+                    })?;
+                    let listener = TcpListener::from_std(std_listener).map_err(|e| {
+                        pyo3::exceptions::PyOSError::new_err(format!("TcpListener::from_std error: {e}"))
+                    })?;
+                    let pool = Arc::clone(&pool);
+                    let routes = Arc::clone(&routes);
+                    let token = shutdown_token.clone();
 
-                loop {
-                    tokio::select! {
-                        result = listener.accept() => {
-                            let (stream, remote_addr) = result.map_err(|e| {
-                                pyo3::exceptions::PyOSError::new_err(format!("accept error: {e}"))
-                            })?;
-
-                            let pool = Arc::clone(&pool);
-                            let routes = Arc::clone(&routes);
-                            let _ = stream.set_nodelay(true);
-                            // TCP_QUICKACK: disable delayed ACK (Linux only).
-                            // Shaves ~40ms off request-response round trips.
-                            #[cfg(target_os = "linux")]
-                            {
-                                use std::os::unix::io::AsRawFd;
-                                let fd = stream.as_raw_fd();
-                                let val: libc::c_int = 1;
-                                unsafe {
-                                    libc::setsockopt(
-                                        fd,
-                                        libc::SOL_TCP,
-                                        libc::TCP_QUICKACK,
-                                        &val as *const _ as *const libc::c_void,
-                                        std::mem::size_of_val(&val) as libc::socklen_t,
-                                    );
-                                }
-                            }
-                            let io = TokioIo::new(stream);
-
-                            tokio::spawn(async move {
-                                let svc = service_fn(move |req: Request<Incoming>| {
+                    tokio::spawn(async move {
+                        loop {
+                            tokio::select! {
+                                result = listener.accept() => {
+                                    let (stream, remote_addr) = match result {
+                                        Ok(v) => v,
+                                        Err(_) => continue,
+                                    };
                                     let pool = Arc::clone(&pool);
                                     let routes = Arc::clone(&routes);
-                                    let client_ip_addr = remote_addr.ip();
-                                    async move {
-                                        if websocket::is_websocket_upgrade(&req) {
-                                            websocket::handle_websocket(req, routes).await
-                                        } else {
-                                            handle_request_subinterp(req, pool, routes, client_ip_addr).await
-                                        }
-                                    }
-                                });
+                                    let _ = stream.set_nodelay(true);
+                                    setup_tcp_quickack(&stream);
+                                    let io = TokioIo::new(stream);
 
-                                if let Err(e) = AutoBuilder::new(hyper_util::rt::TokioExecutor::new())
-                                    .serve_connection_with_upgrades(io, svc)
-                                    .await
-                                {
-                                    let msg = e.to_string();
-                                    if !msg.contains("connection closed")
-                                        && !msg.contains("reset by peer")
-                                        && !msg.contains("broken pipe")
-                                    {
-                                        tracing::warn!(target: "pyre::server", error = %e, "Connection error");
-                                    }
+                                    tokio::spawn(async move {
+                                        let svc = service_fn(move |req: Request<Incoming>| {
+                                            let pool = Arc::clone(&pool);
+                                            let routes = Arc::clone(&routes);
+                                            let client_ip_addr = remote_addr.ip();
+                                            async move {
+                                                if websocket::is_websocket_upgrade(&req) {
+                                                    websocket::handle_websocket(req, routes).await
+                                                } else {
+                                                    handle_request_subinterp(req, pool, routes, client_ip_addr).await
+                                                }
+                                            }
+                                        });
+                                        if let Err(e) = AutoBuilder::new(hyper_util::rt::TokioExecutor::new())
+                                            .serve_connection_with_upgrades(io, svc)
+                                            .await
+                                        {
+                                            let msg = e.to_string();
+                                            if !msg.contains("connection closed")
+                                                && !msg.contains("reset by peer")
+                                                && !msg.contains("broken pipe")
+                                            {
+                                                tracing::warn!(target: "pyre::server", error = %e, "Connection error");
+                                            }
+                                        }
+                                    });
                                 }
-                            });
+                                _ = token.cancelled() => break,
+                            }
                         }
-                        _ = &mut shutdown => {
-                            break;
-                        }
-                    }
+                    });
                 }
+
+                signal::ctrl_c().await.ok();
+                tracing::info!(target: "pyre::server", "Shutting down gracefully...");
+                println!("\n  Shutting down gracefully...");
+                shutdown_token.cancel();
 
                 Ok(())
             })

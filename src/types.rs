@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
 use pyo3::prelude::*;
@@ -9,26 +9,70 @@ use pyo3::prelude::*;
 // PyreRequest
 // ---------------------------------------------------------------------------
 
+/// Two ways to construct headers:
+/// - GIL path: store raw `hyper::HeaderMap`, convert lazily on first Python access.
+/// - Sub-interp path: pre-converted `HashMap` (needed for C-FFI bridge).
+pub(crate) enum LazyHeaders {
+    /// Raw hyper HeaderMap — O(1) construction, deferred conversion.
+    Raw(hyper::HeaderMap),
+    /// Pre-converted (sub-interp path where FFI needs HashMap anyway).
+    Converted(HashMap<String, String>),
+}
+
 #[pyclass(frozen, skip_from_py_object)]
-#[derive(Clone)]
 pub(crate) struct PyreRequest {
     /// Arc<str> — shared with access log, zero-cost clone.
     pub(crate) method: Arc<str>,
     /// Arc<str> — shared with access log, zero-cost clone.
     pub(crate) path: Arc<str>,
     /// Stored as Vec for small-count path params (typically 1-2).
-    /// Exposed to Python as dict via custom getter.
     pub(crate) params: Vec<(String, String)>,
     #[pyo3(get)]
     pub(crate) query: String,
-    /// Headers as HashMap — needed by sub-interp FFI path.
-    /// TODO: Lazy HeaderMap view for GIL path (architecture change).
-    #[pyo3(get)]
-    pub(crate) headers: HashMap<String, String>,
+    /// Lazy headers: raw HeaderMap or pre-converted HashMap.
+    pub(crate) headers_source: LazyHeaders,
+    /// Cached conversion — computed once on first Python access.
+    pub(crate) headers_cache: OnceLock<HashMap<String, String>>,
     /// Raw IP — zero allocation. `.to_string()` only when Python accesses it.
     pub(crate) client_ip_addr: IpAddr,
     /// Stored as Bytes (ref-counted, zero-copy from hyper).
     pub(crate) body_bytes: Bytes,
+}
+
+/// Manual Clone: OnceLock doesn't impl Clone, so we reset the cache on clone.
+/// Cloned requests lazily recompute headers if accessed.
+impl Clone for PyreRequest {
+    fn clone(&self) -> Self {
+        Self {
+            method: self.method.clone(),
+            path: self.path.clone(),
+            params: self.params.clone(),
+            query: self.query.clone(),
+            headers_source: self.headers_source.clone(),
+            headers_cache: OnceLock::new(),
+            client_ip_addr: self.client_ip_addr,
+            body_bytes: self.body_bytes.clone(),
+        }
+    }
+}
+
+impl Clone for LazyHeaders {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Raw(hm) => Self::Raw(hm.clone()),
+            Self::Converted(m) => Self::Converted(m.clone()),
+        }
+    }
+}
+
+impl PyreRequest {
+    /// Resolve headers to HashMap (lazy for Raw, immediate for Converted).
+    pub(crate) fn resolved_headers(&self) -> &HashMap<String, String> {
+        self.headers_cache.get_or_init(|| match &self.headers_source {
+            LazyHeaders::Raw(hm) => extract_headers(hm),
+            LazyHeaders::Converted(m) => m.clone(),
+        })
+    }
 }
 
 #[pymethods]
@@ -47,6 +91,12 @@ impl PyreRequest {
     #[getter]
     fn params(&self) -> HashMap<String, String> {
         self.params.iter().cloned().collect()
+    }
+
+    /// Lazy headers: converts raw HeaderMap → dict only on first access.
+    #[getter]
+    fn headers(&self) -> HashMap<String, String> {
+        self.resolved_headers().clone()
     }
 
     /// Lazy: heap-allocates the IP string only when Python reads `req.client_ip`.

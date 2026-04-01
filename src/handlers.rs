@@ -122,7 +122,8 @@ pub(crate) async fn handle_request(
     let uri = req.uri().clone();
     let path: Arc<str> = Arc::from(uri.path());
     let query = uri.query().unwrap_or("").to_string();
-    let headers = extract_headers(req.headers());
+    // Lazy headers: store raw HeaderMap, convert only if Python accesses req.headers.
+    let raw_headers = req.headers().clone();
 
     use http_body_util::Limited;
     let limited = Limited::new(req.into_body(), max_body_size());
@@ -146,7 +147,6 @@ pub(crate) async fn handle_request(
         None => return Ok(full_body(not_found_response())),
     };
 
-    // Arc::clone is pointer-sized — no heap alloc for log variables.
     let method_log = Arc::clone(&method);
     let path_log = Arc::clone(&path);
     let sky_req = PyreRequest {
@@ -154,7 +154,8 @@ pub(crate) async fn handle_request(
         path,
         params,
         query,
-        headers,
+        headers_source: crate::types::LazyHeaders::Raw(raw_headers),
+        headers_cache: std::sync::OnceLock::new(),
         client_ip_addr,
         body_bytes,
     };
@@ -351,7 +352,8 @@ pub(crate) async fn handle_request_subinterp(
     let uri = req.uri().clone();
     let path: Arc<str> = Arc::from(uri.path());
     let query = uri.query().unwrap_or("").to_string();
-    let headers = extract_headers(req.headers());
+    // Defer header extraction — only convert if needed (sub-interp path).
+    let raw_headers = req.headers().clone();
 
     use http_body_util::Limited;
     let limited = Limited::new(req.into_body(), max_body_size());
@@ -387,7 +389,8 @@ pub(crate) async fn handle_request_subinterp(
             path,
             params,
             query,
-            headers,
+            headers_source: crate::types::LazyHeaders::Raw(raw_headers),
+            headers_cache: std::sync::OnceLock::new(),
             client_ip_addr,
             body_bytes,
         };
@@ -417,6 +420,8 @@ pub(crate) async fn handle_request_subinterp(
     }
 
     // ── Default: sub-interpreter (fast path) ──
+    // Sub-interp FFI bridge needs pre-converted headers.
+    let headers = extract_headers(&raw_headers);
     let method_log = Arc::clone(&method);
     let path_log = Arc::clone(&path);
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
