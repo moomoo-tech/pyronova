@@ -7,6 +7,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use crossbeam_utils::CachePadded;
 use pyo3::prelude::*;
 
 /// Last GIL probe latency (microseconds for precision)
@@ -27,10 +28,13 @@ pub static GIL_QUEUE_LENGTH: std::sync::atomic::AtomicIsize =
 /// Peak business handler GIL hold time (microseconds, reset on read)
 pub static GIL_HOLD_MAX_US: AtomicU64 = AtomicU64::new(0);
 
+// Hot-path counters: CachePadded to avoid false sharing across CPU cores.
+// Each counter gets its own 64-byte cache line.
+
 /// Requests dropped due to backpressure (503 overloaded)
-pub static DROPPED_REQUESTS: AtomicU64 = AtomicU64::new(0);
+pub static DROPPED_REQUESTS: CachePadded<AtomicU64> = CachePadded::new(AtomicU64::new(0));
 /// Total requests processed
-pub static TOTAL_REQUESTS: AtomicU64 = AtomicU64::new(0);
+pub static TOTAL_REQUESTS: CachePadded<AtomicU64> = CachePadded::new(AtomicU64::new(0));
 
 /// Spawn the GIL watchdog background thread.
 pub fn spawn_gil_watchdog() {

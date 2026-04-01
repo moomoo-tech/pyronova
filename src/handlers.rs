@@ -107,6 +107,22 @@ fn resolve_coroutine(py: Python<'_>, obj: Py<PyAny>) -> Result<Py<PyAny>, String
 
 pub(crate) type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
 
+/// Inject CORS headers into any response (normal or error).
+fn apply_cors(resp: &mut Response<BoxBody>, cors_origin: Option<&str>) {
+    if let Some(origin) = cors_origin {
+        let headers = resp.headers_mut();
+        // Use insert (not append) to avoid duplicates
+        if let Ok(v) = origin.parse() {
+            headers.insert("access-control-allow-origin", v);
+        }
+        headers.insert(
+            "access-control-allow-methods",
+            "GET, POST, PUT, DELETE, PATCH, OPTIONS".parse().unwrap(),
+        );
+        headers.insert("access-control-allow-headers", "*".parse().unwrap());
+    }
+}
+
 pub(crate) fn full_body(resp: Response<Full<Bytes>>) -> Response<BoxBody> {
     resp.map(|b| b.map_err(|_| unreachable!()).boxed())
 }
@@ -135,8 +151,16 @@ pub(crate) async fn handle_request(
     .await
     {
         Ok(Ok(c)) => c.to_bytes(),
-        Ok(Err(_)) => return Ok(full_body(payload_too_large_response())),
-        Err(_) => return Ok(full_body(crate::response::gateway_timeout_response())),
+        Ok(Err(_)) => {
+            let mut r = full_body(payload_too_large_response());
+            apply_cors(&mut r, routes.cors_origin.as_deref());
+            return Ok(r);
+        }
+        Err(_) => {
+            let mut r = full_body(crate::response::gateway_timeout_response());
+            apply_cors(&mut r, routes.cors_origin.as_deref());
+            return Ok(r);
+        }
     };
 
     let lookup = routes.lookup(&method, &path);
@@ -181,17 +205,7 @@ pub(crate) async fn handle_request(
         HandlerResult::Stream(info) => build_stream_response(info),
     };
 
-    // Apply CORS headers if configured (matches sub-interpreter behavior)
-    if let Some(origin) = routes.cors_origin.as_ref() {
-        let headers = resp.headers_mut();
-        headers.insert("access-control-allow-origin", origin.parse().unwrap());
-        headers.insert(
-            "access-control-allow-methods",
-            "GET, POST, PUT, DELETE, PATCH, OPTIONS".parse().unwrap(),
-        );
-        headers.insert("access-control-allow-headers", "*".parse().unwrap());
-    }
-
+    apply_cors(&mut resp, routes.cors_origin.as_deref());
     let latency_us = start.elapsed().as_micros() as u64;
     let status = resp.status().as_u16();
     if routes.request_logging {
@@ -388,8 +402,16 @@ pub(crate) async fn handle_request_subinterp(
     .await
     {
         Ok(Ok(c)) => c.to_bytes(),
-        Ok(Err(_)) => return Ok(full_body(payload_too_large_response())),
-        Err(_) => return Ok(full_body(crate::response::gateway_timeout_response())),
+        Ok(Err(_)) => {
+            let mut r = full_body(payload_too_large_response());
+            apply_cors(&mut r, pool.cors_origin.as_deref());
+            return Ok(r);
+        }
+        Err(_) => {
+            let mut r = full_body(crate::response::gateway_timeout_response());
+            apply_cors(&mut r, pool.cors_origin.as_deref());
+            return Ok(r);
+        }
     };
 
     let lookup = pool.lookup(&method, &path);
@@ -436,16 +458,7 @@ pub(crate) async fn handle_request_subinterp(
             HandlerResult::Response(result) => full_body(build_response(result)?),
             HandlerResult::Stream(info) => build_stream_response(info),
         };
-        // Apply CORS to GIL-fallback routes (including SSE streams)
-        if let Some(origin) = routes.cors_origin.as_ref() {
-            let headers = resp.headers_mut();
-            headers.insert("access-control-allow-origin", origin.parse().unwrap());
-            headers.insert(
-                "access-control-allow-methods",
-                "GET, POST, PUT, DELETE, PATCH, OPTIONS".parse().unwrap(),
-            );
-            headers.insert("access-control-allow-headers", "*".parse().unwrap());
-        }
+        apply_cors(&mut resp, routes.cors_origin.as_deref());
         let latency_us = start.elapsed().as_micros() as u64;
         let status = resp.status().as_u16();
         if routes.request_logging {
@@ -481,7 +494,9 @@ pub(crate) async fn handle_request_subinterp(
         response_tx,
     }) {
         crate::monitor::DROPPED_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        return Ok(full_body(overloaded_response(&e)));
+        let mut r = full_body(overloaded_response(&e));
+        apply_cors(&mut r, pool.cors_origin.as_deref());
+        return Ok(r);
     }
 
     let result = match tokio::time::timeout(std::time::Duration::from_secs(30), response_rx).await {
@@ -489,7 +504,9 @@ pub(crate) async fn handle_request_subinterp(
         Ok(Err(_)) => Err("worker thread dropped response".to_string()),
         Err(_) => {
             crate::monitor::DROPPED_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            return Ok(full_body(gateway_timeout_response()));
+            let mut r = full_body(gateway_timeout_response());
+            apply_cors(&mut r, pool.cors_origin.as_deref());
+            return Ok(r);
         }
     };
 

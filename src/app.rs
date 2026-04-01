@@ -299,11 +299,21 @@ impl PyreApp {
         gil: bool,
         py: Python<'_>,
     ) -> PyResult<()> {
-        // Auto-detect if handler is async def
+        // Auto-detect if handler is async def (also check __call__ for class-based views)
         let inspect = py.import("inspect")?;
         let is_async = inspect
             .call_method1("iscoroutinefunction", (&handler,))?
-            .extract::<bool>()?;
+            .extract::<bool>()
+            .unwrap_or(false)
+            || handler
+                .bind(py)
+                .getattr("__call__")
+                .and_then(|c| {
+                    inspect
+                        .call_method1("iscoroutinefunction", (c,))
+                        .and_then(|r| r.extract::<bool>())
+                })
+                .unwrap_or(false);
 
         let mut routes = self.routes.write();
         routes

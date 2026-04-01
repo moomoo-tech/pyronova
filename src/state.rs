@@ -98,6 +98,23 @@ impl SharedState {
         }
     }
 
+    /// Atomic increment: returns the new value. Creates key with `amount` if missing.
+    fn incr(&self, key: String, amount: i64) -> i64 {
+        let mut entry = self.inner.entry(key).or_insert_with(|| Bytes::from("0"));
+        let current: i64 = std::str::from_utf8(entry.value())
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let new_val = current + amount;
+        *entry = Bytes::from(new_val.to_string());
+        new_val
+    }
+
+    /// Atomic decrement: returns the new value.
+    fn decr(&self, key: String, amount: i64) -> i64 {
+        self.incr(key, -amount)
+    }
+
     fn __repr__(&self) -> String {
         format!("SharedState({} keys)", self.inner.len())
     }
