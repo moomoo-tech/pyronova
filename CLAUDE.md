@@ -122,7 +122,7 @@ tests/
 benchmarks/
   run_comparison.sh   # Pyre vs FastAPI head-to-head
   run_bench.sh        # Pyre vs Robyn
-  benchmark-*.md      # Results history (11 reports)
+  benchmark-*.md      # Results history (14 reports)
 docs/
   subinterp-safe-ecosystem.md  # Golden Path ecosystem guide
   phase-7.2-async-bridge.md    # Native async bridge design
