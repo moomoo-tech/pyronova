@@ -134,7 +134,7 @@ def test_static_symlink_out_of_root_refused(static_dir):
         return {"ok": True}
 
     app.static("/s/", static_dir)
-    c = TestClient(app, port=19883)
+    c = TestClient(app, port=19896)
     try:
         resp = c.get("/s/trap.txt")
         # Accept any refusal path:

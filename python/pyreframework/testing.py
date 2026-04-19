@@ -57,7 +57,17 @@ class TestClient:
             resp = client.post("/data", body={"key": "value"})
     """
 
-    def __init__(self, app, host: str = "127.0.0.1", port: int = 19876):
+    def __init__(self, app, host: str = "127.0.0.1", port: int | None = 19876):
+        # port=None auto-picks an unused port. Prefer this in new tests —
+        # hard-coded ports collide across test files and produce
+        # test-order-dependent flakes (two module fixtures bind the same
+        # port, the second fails or worse, reuses the prior server).
+        if port is None:
+            import socket as _socket
+            s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+            s.bind((host, 0))
+            port = s.getsockname()[1]
+            s.close()
         self.host = host
         self.port = port
         self.base_url = f"http://{host}:{port}"

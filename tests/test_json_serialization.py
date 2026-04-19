@@ -311,7 +311,7 @@ def client():
         d["b"] = 20
         return d  # Return raw defaultdict, not converted
 
-    c = TestClient(app, port=19878)
+    c = TestClient(app, port=19895)
     yield c
     c.close()
 
