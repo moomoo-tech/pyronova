@@ -82,9 +82,33 @@ pub(crate) async fn try_static_file(
         // opening first and calling metadata() on the File, both checks
         // operate on the same inode; symlink or rename swaps after open
         // cannot change which bytes we read.
-        let file = match tokio::fs::File::open(&file_canonical).await {
-            Ok(f) => f,
-            Err(_) => continue,
+        //
+        // O_NOFOLLOW: the canonicalize containment check above followed
+        // symlinks to resolve the target. Between that and the open, an
+        // attacker with write access to the final path segment could
+        // swap the file for a symlink pointing anywhere on disk. With
+        // O_NOFOLLOW, `open` refuses to follow a symlink at the last
+        // component and returns ELOOP — closing the TOCTOU window.
+        // Legitimate symlinks inside the static root are resolved by
+        // canonicalize above; we only refuse symlinks that *appeared*
+        // after the containment decision was made.
+        let file = {
+            #[cfg(unix)]
+            {
+                let mut opts = tokio::fs::OpenOptions::new();
+                opts.read(true).custom_flags(libc::O_NOFOLLOW);
+                match opts.open(&file_canonical).await {
+                    Ok(f) => f,
+                    Err(_) => continue,
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                match tokio::fs::File::open(&file_canonical).await {
+                    Ok(f) => f,
+                    Err(_) => continue,
+                }
+            }
         };
         let metadata = match file.metadata().await {
             Ok(m) => m,

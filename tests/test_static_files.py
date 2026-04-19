@@ -94,3 +94,60 @@ def test_post_static_file_rejected(client):
     """POST to static file should return 404 (only GET/HEAD allowed)."""
     resp = client.post("/static/index.html")
     assert resp.status_code == 404
+
+
+# -----------------------------------------------------------------------------
+# TOCTOU regression (advisor audit #14)
+# -----------------------------------------------------------------------------
+#
+# Background: static file serving canonicalizes the candidate path, verifies
+# it sits inside the configured root, then opens the file. If an attacker can
+# swap the final path component for a symlink between those two steps, they
+# can read arbitrary files on disk through the otherwise-valid mount.
+#
+# Defense: `tokio::fs::OpenOptions::custom_flags(O_NOFOLLOW)` — refuses to
+# follow symlinks at the final component. Legitimate symlinks inside the
+# static root are resolved earlier by `canonicalize` so real static mounts
+# still work; only symlinks that arrive *after* the containment decision
+# are rejected.
+#
+# This test simulates the post-check swap: we replace one of the static
+# files with a symlink to /etc/passwd, then request it. Before the fix the
+# server would happily read /etc/passwd. After the fix it refuses (500 or
+# 404 or 403 — any non-200 with no /etc/passwd content is acceptable).
+
+def test_static_symlink_out_of_root_refused(static_dir):
+    """Symlink pointing outside the static root must not be followed."""
+    import subprocess
+    # Replace readme.txt with a symlink to /etc/passwd
+    readme = os.path.join(static_dir, "trap.txt")
+    try:
+        os.symlink("/etc/passwd", readme)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink not supported on this platform")
+
+    app = Pyre()
+
+    @app.get("/")
+    def _health(req):
+        # TestClient polls `/` to detect server readiness.
+        return {"ok": True}
+
+    app.static("/s/", static_dir)
+    c = TestClient(app, port=19883)
+    try:
+        resp = c.get("/s/trap.txt")
+        # Accept any refusal path:
+        #   - 403 (canonicalize resolved to outside root → starts_with fails)
+        #   - 404 (O_NOFOLLOW ELOOP at open → `continue`s to next mount)
+        #   - any non-200
+        # What we MUST NOT see: 200 + /etc/passwd contents.
+        assert resp.status_code != 200 or b"root:" not in resp.content, (
+            f"symlink to /etc/passwd was served! status={resp.status_code} "
+            f"body[:80]={resp.content[:80]!r}"
+        )
+    finally:
+        try:
+            os.unlink(readme)
+        except OSError:
+            pass

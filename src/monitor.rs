@@ -84,13 +84,23 @@ pub fn record_gil_wait(wait_us: u64) {
 /// Stop flag for the RSS sampler thread.
 static RSS_SAMPLER_RUNNING: AtomicBool = AtomicBool::new(false);
 
+/// Handle to the spawned sampler thread. `stop_rss_sampler` takes it
+/// and joins — the previous code dropped the handle immediately,
+/// leaving the thread racing `Py_Finalize` during process exit. If
+/// the extension's `.so` was unloaded before the sampler's sleep(1)
+/// woke up, the thread's next instruction pointed at freed pages →
+/// segfault (spurious non-zero exit signalled K8s / systemd etc.).
+static RSS_SAMPLER_HANDLE: std::sync::Mutex<Option<std::thread::JoinHandle<()>>> =
+    std::sync::Mutex::new(None);
+
 /// Spawn a lightweight background thread that samples process RSS.
-/// Returns a JoinHandle for deterministic shutdown (caller must join).
+/// The handle is stashed in `RSS_SAMPLER_HANDLE`; `stop_rss_sampler`
+/// joins it on shutdown.
 ///
 /// This thread never touches Python or the GIL — it only reads /proc/self/statm.
-pub fn spawn_rss_sampler() -> std::thread::JoinHandle<()> {
+pub fn spawn_rss_sampler() {
     RSS_SAMPLER_RUNNING.store(true, Ordering::Release);
-    std::thread::Builder::new()
+    let handle = std::thread::Builder::new()
         .name("pyre-rss-sampler".to_string())
         .spawn(|| {
             while RSS_SAMPLER_RUNNING.load(Ordering::Relaxed) {
@@ -101,13 +111,26 @@ pub fn spawn_rss_sampler() -> std::thread::JoinHandle<()> {
             }
             tracing::debug!(target: "pyre::server", "RSS sampler stopped");
         })
-        .expect("failed to spawn RSS sampler")
+        .expect("failed to spawn RSS sampler");
+    if let Ok(mut slot) = RSS_SAMPLER_HANDLE.lock() {
+        // Drop any previous handle (shouldn't happen — spawn is guarded
+        // by METRICS_INIT call_once — but belt + suspenders).
+        *slot = Some(handle);
+    }
 }
 
-/// Signal the RSS sampler to stop. Non-blocking — call join() on the
-/// returned JoinHandle to wait for actual termination.
+/// Signal the RSS sampler to stop AND join the thread. Blocks up to
+/// one sample interval (~1s) while the thread wakes from its sleep,
+/// observes the stop flag, and exits. On process shutdown this is
+/// mandatory — otherwise `Py_Finalize` can unload the Rust extension
+/// while the sampler thread is still sleeping, and waking into freed
+/// code pages segfaults.
 pub fn stop_rss_sampler() {
     RSS_SAMPLER_RUNNING.store(false, Ordering::Release);
+    let handle = RSS_SAMPLER_HANDLE.lock().ok().and_then(|mut slot| slot.take());
+    if let Some(h) = handle {
+        let _ = h.join();
+    }
 }
 
 /// Get current process RSS in bytes (platform-specific, zero dependencies).
