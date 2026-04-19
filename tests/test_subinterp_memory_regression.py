@@ -321,25 +321,19 @@ def test_pyrerequest_does_not_accumulate(server):
 # ─────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Pyre sub-interpreters (PEP 684 OWN_GIL) do not run Python "
-        "__del__ / tp_finalize hooks. Confirmed against a plain "
-        "Python class defined inside a handler — instances are freed "
-        "but their __del__ never fires."
-    ),
-    strict=False,
-)
 def test_subinterp_python_finalizers_fire(server):
-    """Tracks the underlying CPython sub-interp finalizer bug.
+    """Python __del__ / tp_finalize runs in sub-interp handlers.
 
-    This is the root cause of the headers/params dict leak. When a real
-    fix lands (either in CPython or via a Rust-side workaround), remove
-    the xfail marker.
+    Historically xfail'd because Pyre's sub-interp workers reused the
+    creator-thread's tstate across OS threads, and CPython's per-OS-
+    thread finalizer bookkeeping silently stopped firing. Fixed by
+    `rebind_tstate_to_current_thread`: each worker creates a fresh
+    thread-local tstate via `PyThreadState_New(interp)` on first
+    entry. Finalizers now fire normally.
     """
     stats = _get("/probe_stats")
     # 50 probes created, all immediately `del`'d. __del__ should fire
-    # for all 50 after gc.collect(). Currently fires for ZERO.
+    # for all 50 after gc.collect().
     assert stats["finalized_delta"] >= stats["created_delta"] - 5
 
 
@@ -390,38 +384,28 @@ def test_rss_growth_per_request_is_bounded(server):
 
     delta_kb = after - baseline
     per_req_bytes = (delta_kb * 1024) / 5000
-    # Journey so far:
+    # Journey:
     #   Pre any fix:                           ~1000 B/req
-    #   + Vectorcall handler call              ~1000 B/req (same — that
-    #                                           fix cleared the _PyreRequest
-    #                                           leak but not dict leak)
-    #   + Vectorcall _PyreRequest construction ~1000 B/req (same — dict
-    #                                           leak unchanged)
-    #   + Slot DelAttr workaround              ~530 B/req  (dict leak
-    #                                           fixed — this is the
-    #                                           residual we haven't
-    #                                           characterised yet)
-    #   + Instance recycling (d67a988)         ~530 B/req  (same — recycling
-    #                                           cut ALLOCATION churn but
-    #                                           this test's arena-pressure
-    #                                           residual stayed put)
-    #   + Raw C-API _PyreRequest type          ~820 B/req SERIAL (worse)
-    #     + tp_dealloc + no recycling                       113 B/req @ 350k rps (better)
-    #                                           Tradeoff documented — raw
-    #                                           type gives us a deterministic
-    #                                           Rust-owned finalizer and
-    #                                           blocks subtype_dealloc, but
-    #                                           loses Route A's arena
-    #                                           reuse. At high QPS pymalloc
-    #                                           amortizes; at serial load
-    #                                           each fresh shell touches a
-    #                                           cold arena slot.
-    # Ceiling bumped to 900 B/req to reflect the serial-load tradeoff.
-    # The REAL target is still <50 B/req — the residual (headers dict /
-    # handler+response path) is an open investigation, tracked at
-    # docs/memory-leak-investigation-2026-04-19.md.
-    assert per_req_bytes < 900, (
+    #   + Vectorcall handler call              ~1000 B/req
+    #   + Vectorcall _PyreRequest construction ~1000 B/req
+    #   + Slot DelAttr workaround              ~530 B/req
+    #   + Instance recycling (d67a988)         ~530 B/req
+    #   + Raw C-API _PyreRequest type          ~820 B/req serial (worse)
+    #                                          ~113 B/req @ 350k rps (better)
+    #   + PyDict_Clear in tp_dealloc           ~63 B/req
+    #   + TaskTracker graceful shutdown        ~63 B/req (same — shutdown concern)
+    #   ================================================================
+    #   + rebind_tstate_to_current_thread     ~0 B/req  ← ROOT CAUSE FIX
+    #   ================================================================
+    # Root cause: sub-interp workers reused the creator-thread's tstate
+    # across OS threads. CPython's per-OS-thread tstate bookkeeping
+    # leaks ~1 KB/iter under that pattern. Fixed by giving each worker
+    # its own `PyThreadState_New(interp)` on first entry.
+    # Pure-C bisect: /tmp/pep684_repro/repro_threadstate_new.c
+    # Production measurement: 73.8M requests @ 410k rps over 180s
+    # → RSS grew 4 MB total (~0.057 B/req).
+    assert per_req_bytes < 200, (
         f"RSS grew {delta_kb} KB over 5000 requests — "
-        f"{per_req_bytes:.0f} B/request. Expected < 900 B/req. "
+        f"{per_req_bytes:.0f} B/request. Expected < 200 B/req. "
         f"Any increase beyond this is a regression."
     )

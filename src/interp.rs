@@ -1805,6 +1805,64 @@ impl Drop for SubInterpGilGuard<'_> {
     }
 }
 
+/// Rebind the worker's sub-interp tstate to THIS OS thread.
+///
+/// # The Bug
+///
+/// `SubInterpreterWorker::new` runs on the main thread. It calls
+/// `Py_NewInterpreterFromConfig`, which creates a tstate on the
+/// creator's OS thread, runs the init script, then `PyEval_SaveThread`'s
+/// it. The worker thread picks up that saved tstate and does
+/// `PyEval_RestoreThread` / `PyEval_SaveThread` per request.
+///
+/// This pattern works — but leaks ~1 KB per request under sustained
+/// load. Measured with a pure-C reproducer (no Rust, no Pyre,
+/// no hyper, just PyDict alloc/decref + attach/detach loop):
+///
+///   variant=0 (SHARED tstate across threads)   B/iter = 997
+///   variant=1 (FRESH tstate via PyThreadState_New)  B/iter = 0
+///
+/// CPython's tstate carries per-OS-thread state (GIL reacquisition
+/// bookkeeping, some pymalloc bindings) that accumulates when a
+/// tstate created on one OS thread is repeatedly attached/detached
+/// on a different OS thread. The fix is to give each worker its
+/// OWN tstate, bound to its OS thread from the first attach.
+///
+/// # The Fix
+///
+/// On worker entry:
+///   1. Attach the creator's tstate (`worker.tstate`) briefly.
+///   2. Create a fresh tstate via `PyThreadState_New(interp)` — this
+///      tstate is bound to THIS OS thread.
+///   3. Swap it in; clear + delete the creator's tstate.
+///   4. Use the fresh tstate for all request handling.
+///
+/// On worker exit, attach the fresh tstate and `Py_EndInterpreter`,
+/// which destroys the sub-interp and all remaining tstates for it.
+///
+/// See docs/memory-leak-investigation-2026-04-19.md and
+/// /tmp/pep684_repro/repro_threadstate_new.c for the bisection.
+unsafe fn rebind_tstate_to_current_thread(
+    creator_tstate: *mut ffi::PyThreadState,
+) -> *mut ffi::PyThreadState {
+    // Attach creator tstate so we can call PyThreadState_New.
+    ffi::PyEval_RestoreThread(creator_tstate);
+    let interp = ffi::PyInterpreterState_Get();
+    let fresh = ffi::PyThreadState_New(interp);
+    if fresh.is_null() {
+        // Fall back to creator tstate (leak will reappear but we stay alive).
+        return creator_tstate;
+    }
+    // Swap to fresh tstate. Returns the previous current tstate = creator.
+    let prev = ffi::PyThreadState_Swap(fresh);
+    debug_assert_eq!(prev, creator_tstate);
+    // Dispose of the creator tstate from this thread.
+    ffi::PyThreadState_Clear(creator_tstate);
+    ffi::PyThreadState_Delete(creator_tstate);
+    // Release GIL; hand back the fresh tstate for future attach cycles.
+    ffi::PyEval_SaveThread()
+}
+
 /// Main loop for each worker OS thread.
 fn worker_thread_loop(
     mut worker: SubInterpreterWorker,
@@ -1814,6 +1872,13 @@ fn worker_thread_loop(
     after_hook_names: &[String],
     request_logging: &AtomicBool,
 ) {
+    // Rebind the sub-interp tstate to this OS thread (fixes the
+    // cross-thread attach/detach leak). See
+    // `rebind_tstate_to_current_thread` doc for details.
+    unsafe {
+        worker.tstate = rebind_tstate_to_current_thread(worker.tstate);
+    }
+
     while let Ok(req) = rx.recv() {
         // Skip requests whose caller already timed out (504) — avoid wasting
         // CPU on "dead" requests during queue backlog (prevents snowball effect).
@@ -1922,6 +1987,11 @@ fn worker_thread_loop_async(
         format!("WORKER_ID = {worker_idx}\nHANDLER_NAMES = [{handlers_array}]\n{engine_template}");
 
     unsafe {
+        // Rebind tstate to this OS thread — same cross-thread leak as
+        // the sync worker loop. See `rebind_tstate_to_current_thread`
+        // doc for details.
+        worker.tstate = rebind_tstate_to_current_thread(worker.tstate);
+
         ffi::PyEval_RestoreThread(worker.tstate);
 
         // Register C-FFI functions in sub-interpreter globals.
