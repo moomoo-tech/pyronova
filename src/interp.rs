@@ -445,6 +445,8 @@ impl Drop for PyObjRef {
                     );
                     return; // Leak is better than crash
                 }
+                #[cfg(feature = "leak_detect")]
+                crate::leak_detect::record_drop(self.ptr);
                 ffi::Py_DECREF(self.ptr);
             }
         }
@@ -812,6 +814,20 @@ impl SubInterpreterWorker {
             args_arr.len(),
             std::ptr::null_mut(),
         ));
+
+        // Workaround for a CPython sub-interpreter leak:
+        // `_PyObject_MakeTpCall` (Vectorcall's fallback when the callable
+        // has no `tp_vectorcall` slot, which pure Python classes do NOT
+        // expose) constructs an internal args tuple, INCREFs every arg
+        // into it, and fails to DECREF them on cleanup in sub-interp
+        // mode. Net effect: every arg gets +1 it never drops, so dicts
+        // we pass (headers, params) leak forever. Manual DECREF here
+        // balances the books. For non-leaking objects (interned str
+        // singletons like "GET") this is a no-op on their effective
+        // refcount because the interner already holds many refs.
+        for p in args_arr.iter() {
+            ffi::Py_DECREF(*p);
+        }
 
         // Explicit drops so we release these refs BEFORE returning; keeps
         // the intent clear (and matches the hook-call site pattern).
@@ -1219,6 +1235,43 @@ impl SubInterpreterWorker {
             1,
             std::ptr::null_mut(),
         ));
+
+        // Explicit slot clearing — workaround for a CPython PEP 684
+        // sub-interpreter bug: Python-level finalizers (tp_finalize /
+        // __del__) do not fire on per-request instances in a sub-interp,
+        // and the corresponding tp_dealloc path doesn't DECREF __slots__
+        // values either. Net effect: every request's headers/params
+        // dicts (and the PyBytes body) stay alive forever.
+        //
+        // Forcing each slot to None via PyObject_DelAttrString here
+        // DECREFs the current value *while we still hold the GIL and a
+        // valid ref* — the dict/bytes goes to refcount 0 and frees
+        // immediately. Without this clear, _PyreRequest itself is
+        // destroyed but its slot contents orphan-leak in per-sub-interp
+        // PyMalloc arenas.
+        //
+        // Once sub-interp finalization is fixed in CPython, this block
+        // becomes redundant and can be removed.
+        if req_for_hooks.is_none() {
+            let req_ptr = request_obj.as_ptr();
+            for attr in [
+                c"method",
+                c"path",
+                c"params",
+                c"query",
+                c"body_bytes",
+                c"headers",
+                c"client_ip",
+            ] {
+                let _ = ffi::PyObject_DelAttrString(req_ptr, attr.as_ptr());
+            }
+            // PyObject_DelAttrString sets an error on failure (e.g. if a
+            // slot was never set). Clear it so the next Python call is
+            // clean.
+            if !ffi::PyErr_Occurred().is_null() {
+                ffi::PyErr_Clear();
+            }
+        }
         // request_obj is owned by this PyObjRef; drops at fn end → Py_DECREF.
         // No tuple allocation to leak.
         drop(request_obj);
@@ -1265,6 +1318,27 @@ impl SubInterpreterWorker {
                         _ => {}
                     }
                 }
+            }
+
+            // After-hooks done — clear the request slots now (same
+            // rationale as the no-hooks branch above; must happen while
+            // we hold the GIL). Both `request_obj` and `req_for_hooks`
+            // own a ref, so slot DECREF here runs against the live
+            // object; dropping the remaining refs releases the shell.
+            let req_ptr = req_for_hooks.as_ptr();
+            for attr in [
+                c"method",
+                c"path",
+                c"params",
+                c"query",
+                c"body_bytes",
+                c"headers",
+                c"client_ip",
+            ] {
+                let _ = ffi::PyObject_DelAttrString(req_ptr, attr.as_ptr());
+            }
+            if !ffi::PyErr_Occurred().is_null() {
+                ffi::PyErr_Clear();
             }
         }
 
@@ -1447,9 +1521,17 @@ impl InterpreterPool {
         })
     }
 
-    /// Look up a route.
+    /// Look up a route. Case-insensitive on method per RFC 9110 §9.1 —
+    /// matches the sibling `RouteTable::lookup` in src/router.rs. Without
+    /// this normalization, lowercase / mixed-case HTTP verbs from the
+    /// wire (hyper accepts them) silently fell through to 404 in
+    /// sub-interpreter mode.
     pub fn lookup(&self, method: &str, path: &str) -> Option<(usize, Vec<(String, String)>)> {
-        let router = self.routers.get(method)?;
+        let router = if method.bytes().any(|b| b.is_ascii_lowercase()) {
+            self.routers.get(&method.to_ascii_uppercase())?
+        } else {
+            self.routers.get(method)?
+        };
         let matched = router.at(path).ok()?;
         let params: Vec<(String, String)> = matched
             .params

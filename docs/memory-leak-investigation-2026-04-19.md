@@ -274,6 +274,88 @@ Left open:
   slots would shrink per-instance size and may interact with the
   remaining leak. Worth testing alongside the hot-path rework.
 
+## Session 2 update — dict leak resolved, underlying CPython bug confirmed
+
+**Deeper hypothesis landed**: CPython sub-interpreters under PEP 684
+(OWN_GIL) **do not run Python-level finalizers (`tp_finalize` /
+`__del__`)**. Proven with the smallest possible reproducer — a plain
+Python class defined inside a handler, `__del__` incrementing a
+counter, forced `del` each request: 300 requests → counter still 0.
+Same code in the main interpreter: counter increments correctly. The
+objects ARE being freed (gone from `gc.get_objects()`), but the
+Python-observable finalization path is skipped in the sub-interp.
+
+This is a CPython issue, not a Pyre bug. Relevant upstream discussion
+lives around PEP 684 and the `_PyInterpreterState_SetFinalizing`
+path — we are not going to fix it from our side. Mitigation:
+
+**Explicit slot clear in `call_handler`** before dropping the request:
+```rust
+for attr in [c"method", c"path", c"params", c"query",
+             c"body_bytes", c"headers", c"client_ip"] {
+    let _ = ffi::PyObject_DelAttrString(req_ptr, attr.as_ptr());
+}
+```
+
+This works *because we hold the sub-interp GIL right here and the
+instance is still valid*; `DelAttrString` issues the DECREF that the
+sub-interp's own dealloc path never gets around to. Net effect:
+
+- `_PyreRequest` accumulation: 0/req (already fixed in session 1)
+- Headers/params `dict` accumulation: **0/req** (fixed in session 2)
+- `sys.getrefcount`/`gc.get_objects()` on both now drop the count to
+  baseline after load, not linear growth
+- RSS growth per request: from ~1000 B → **~530 B** under wrk load
+
+The remaining ~500 B / request has no gc-visible owner — likely
+mimalloc arena retention (Rust side), PyMalloc free-list that doesn't
+return to the OS, or a Rust-side container that doesn't reuse its
+backing buffer. Investigation for v1.4.6.
+
+## Tooling kept
+
+The leak-detection instrumentation is preserved behind a Cargo
+feature so future investigations don't have to reinvent it.
+
+- `src/leak_detect.rs` — per-(type_name, refcount) histogram sampler,
+  dumps top-N buckets to stderr every 500K drops.
+- Enable with:
+  ```bash
+  maturin develop --release --features leak_detect
+  python examples/hello.py 2> drops.log &
+  wrk -t4 -c100 -d10s http://127.0.0.1:8000/
+  grep "leak_detect" drops.log | tail -5
+  ```
+- Interpretation guide is in the file's module docstring.
+
+The instrumentation cost is zero in default builds (the `record_drop`
+call is `#[cfg]`'d out and the module isn't compiled). Enabling it
+adds a mutex + histogram entry per drop — not production-safe, but
+fast enough for a full bench under wrk.
+
+## Test harness
+
+Committed as `tests/test_subinterp_memory_regression.py` and backed by
+`tests/conftest.py`:
+
+- Parametrised `feature_server` fixture runs GIL + subinterp modes
+  from a single server script. No more per-test server restarts.
+- `test_pyrerequest_does_not_accumulate` — locks the session-1 fix.
+- `test_headers_dicts_do_not_accumulate` — locks the session-2 fix.
+- `test_subinterp_python_finalizers_fire` (xfail) — tracks the
+  underlying CPython bug so if a future Python release fixes it we
+  see the test flip to xpass.
+- `test_rss_growth_per_request_is_bounded` (xfail) — tracks the
+  residual ~500 B/req growth not yet accounted for.
+- Plus the v1.4.5 security / correctness tests (cookie CRLF rejection
+  via the sub-interp mock, router case-insensitivity on subinterp
+  path).
+
+Same session also split the monolithic `test_all_features.py` into
+`test_routing_e2e.py`, `test_cookies_e2e.py`, `test_uploads_e2e.py`,
+and `test_cors_e2e.py`. Each topic is independently runnable and
+failure-isolated; they all share the `feature_server_factory`.
+
 ## Numbers
 
 Before any fix, fresh server, `wrk -t4 -c100 -d10s`, repeated 6 times:

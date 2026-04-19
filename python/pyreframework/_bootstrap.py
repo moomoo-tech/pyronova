@@ -216,7 +216,25 @@ def _get_cookies(req):
     return r
 def _get_cookie(req, name, default=None):
     return _get_cookies(req).get(name, default)
+_COOKIE_FORBIDDEN = ("\r", "\n", "\0")
+def _reject_cookie_crlf(field, value):
+    if value is None:
+        return
+    for ch in _COOKIE_FORBIDDEN:
+        if ch in value:
+            raise ValueError(
+                f"cookie {field} contains forbidden control character "
+                f"{ch!r}; refusing to emit (HTTP response splitting risk)"
+            )
 def _set_cookie(resp, name, value, **kw):
+    # Mirror the real pyreframework.cookies check so sub-interp mode has
+    # the same HTTP Response Splitting defence as GIL mode. Without this
+    # the sub-interp mock would silently emit attacker-controlled bytes
+    # into the Set-Cookie header, defeating the v1.4.5 fix.
+    _reject_cookie_crlf("name", name)
+    _reject_cookie_crlf("value", value)
+    _reject_cookie_crlf("path", kw.get("path"))
+    _reject_cookie_crlf("domain", kw.get("domain"))
     parts = [f"{name}={value}"]
     if kw.get("max_age") is not None: parts.append(f"Max-Age={kw['max_age']}")
     if kw.get("path", "/"): parts.append(f"Path={kw.get('path','/')}")

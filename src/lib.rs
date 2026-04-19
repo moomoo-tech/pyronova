@@ -5,6 +5,8 @@ mod app;
 mod handlers;
 mod interp;
 mod json;
+#[cfg(feature = "leak_detect")]
+mod leak_detect;
 mod logging;
 mod monitor;
 mod response;

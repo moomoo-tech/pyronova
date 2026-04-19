@@ -7,6 +7,17 @@ edition = "2021"
 name = "pyreframework_engine"
 crate-type = ["cdylib"]
 
+[features]
+# Opt-in diagnostics for PyObject lifecycle leaks. Prints per-type
+# refcount histograms from PyObjRef::Drop to stderr. Non-trivial
+# overhead; never enable in production. Build with:
+#   cargo build --features leak_detect
+# or:
+#   maturin develop --release --features leak_detect
+# See docs/memory-leak-investigation-2026-04-19.md for how we used this
+# to pin down the sub-interpreter finalizer bug.
+leak_detect = []
+
 [dependencies]
 pyo3 = { version = "0.28", features = ["extension-module"] }
 tokio = { version = "1", features = ["full"] }
