@@ -786,8 +786,15 @@ impl SubInterpreterWorker {
         // Attach helper methods directly on the type (mutable by
         // virtue of Py_TPFLAGS_HEAPTYPE). Users can do
         // `req.text()` / `req.json()` / `req.body` / `req.query_params`.
+        //
+        // Also rebind the mock module attributes (`pyreframework.PyreRequest`
+        // and `pyreframework.engine.PyreRequest`) to this Rust type —
+        // `_bootstrap.py` sets them to None as placeholders because it
+        // runs BEFORE this injection. User code doing
+        // `from pyreframework import PyreRequest` or
+        // `isinstance(req, PyreRequest)` then gets the real type.
         let helpers_src = c"\
-def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n    import json as _json\n    t.body = property(lambda self: self.body_bytes)\n    t.query_params = property(lambda self: {k: v[0] for k, v in parse_qs(self.query).items()})\n    t.text = lambda self: self.body_bytes.decode('utf-8') if isinstance(self.body_bytes, (bytes, bytearray)) else str(self.body_bytes)\n    t.json = lambda self: _json.loads(self.text())\n_attach_pyre_request_helpers(_PyreRequest)\n";
+def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n    import json as _json\n    t.body = property(lambda self: self.body_bytes)\n    t.query_params = property(lambda self: {k: v[0] for k, v in parse_qs(self.query).items()})\n    t.text = lambda self: self.body_bytes.decode('utf-8') if isinstance(self.body_bytes, (bytes, bytearray)) else str(self.body_bytes)\n    t.json = lambda self: _json.loads(self.text())\n_attach_pyre_request_helpers(_PyreRequest)\nimport sys as _sys\n_m = _sys.modules.get('pyreframework.engine')\nif _m is not None:\n    _m.PyreRequest = _PyreRequest\n_p = _sys.modules.get('pyreframework')\nif _p is not None:\n    _p.PyreRequest = _PyreRequest\n";
         let helpers_result = ffi::PyRun_String(
             helpers_src.as_ptr(),
             ffi::Py_file_input,

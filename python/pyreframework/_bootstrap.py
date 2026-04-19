@@ -73,29 +73,14 @@ _root.setLevel(_PYRE_LEVEL_MAP.get(
 ))
 
 # -- Request / Response stubs ------------------------------------------------
-
-class _PyreRequest:
-    __slots__ = ("method", "path", "params", "query", "body_bytes", "headers", "client_ip")
-    def __init__(self, method, path, params, query, body_bytes, headers, client_ip=""):
-        self.method = method
-        self.path = path
-        self.params = params
-        self.query = query
-        self.body_bytes = body_bytes
-        self.headers = headers
-        self.client_ip = client_ip
-    @property
-    def body(self):
-        return self.body_bytes
-    @property
-    def query_params(self):
-        from urllib.parse import parse_qs
-        return {k: v[0] for k, v in parse_qs(self.query).items()}
-    def text(self):
-        return self.body_bytes.decode('utf-8') if isinstance(self.body_bytes, bytes) else str(self.body_bytes)
-    def json(self):
-        import json
-        return json.loads(self.text())
+#
+# `_PyreRequest` is defined later by Rust (src/pyre_request_type.rs) via
+# PyType_FromSpec — it's a raw C heap type with __slots__-equivalent C
+# members, a custom tp_dealloc, and helper methods (.text/.json/.body/
+# .query_params) monkey-patched on at sub-interp init. The Python class
+# that used to live here has been removed; see commit `d4bce1c` for the
+# Route B migration and commit `fc45a7f` for the tstate fix that made
+# it safe to rely solely on the Rust type.
 
 class _PyreResponse:
     # Strict __slots__: no __dict__, no dynamic attributes. Paired with
@@ -131,7 +116,13 @@ _mock_engine.PyreApp = type("PyreApp", (), {
     "static_dir": lambda self, *a: None,
     "run": lambda self, **kw: None,
 })
-_mock_engine.PyreRequest = _PyreRequest
+# PyreRequest is bound to the raw-C Rust type by interp.rs after this
+# bootstrap script finishes running — the Rust injection overwrites
+# both `globals()["_PyreRequest"]` and these module-level references.
+# Until then it's None; user code should not import PyreRequest at
+# module-load time anyway (the type is only meaningful inside a
+# running sub-interp handler).
+_mock_engine.PyreRequest = None
 _mock_engine.PyreResponse = _PyreResponse
 _mock_engine.PyreWebSocket = type("PyreWebSocket", (), {})
 _mock_engine.SharedState = type("SharedState", (), {})
@@ -141,7 +132,7 @@ _mock_engine.get_gil_metrics = lambda: (0,0,0,0,0,0,0,0,0)
 _mock_pyreframework = types.ModuleType("pyreframework")
 _mock_pyreframework.engine = _mock_engine
 _mock_pyreframework.PyreApp = _mock_engine.PyreApp
-_mock_pyreframework.PyreRequest = _PyreRequest
+_mock_pyreframework.PyreRequest = None  # overwritten by interp.rs post-bootstrap
 _mock_pyreframework.PyreResponse = _PyreResponse
 _mock_pyreframework.PyreWebSocket = _mock_engine.PyreWebSocket
 _mock_pyreframework.SharedState = _mock_engine.SharedState
