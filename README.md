@@ -4,16 +4,39 @@
 
 Built on Per-Interpreter GIL (PEP 684) and a Rust async core, Pyre runs Python handlers across all CPU cores in a single process.
 
-- **429k req/s** on Linux (8C/16T), **2.7x faster** than Robyn at equal scale (16 workers each), **1/3 the memory**.
-- 300s sustained **400k QPS**, 120 million requests, zero errors, zero memory leaks.
+- **902k req/s** on Linux (AMD Ryzen 7840HS, 8C/16T) under TechEmpower-style
+  pipelined plaintext (`wrk -t8 -c256 --pipeline 16`).
+- **423k req/s** on the standard single-route baseline (`wrk -t4 -c100`,
+  no pipeline), **+0.8% vs v1.4.0** on the same hardware.
+- **2.7× faster than Robyn** at equal scale (16 workers each), **1/3 the memory**.
+- Sustained **400k QPS**: RSS grew **4 MB over 73.8M requests** in 180s
+  (≈0 B/req). Zero errors, zero leaks.
 
-### What's new in v1.4.0
+### What's new in v1.5.0
 
-- **M:N scheduling** — `io_workers` (Tokio I/O threads) and `workers` (Python sub-interpreters) configured independently
-- **SO_REUSEPORT multi-accept** — N independent accept loops with kernel-level load balancing on Linux
-- **LTO + TCP_QUICKACK + mimalloc** — compile-time whole-program optimization, reduced first-byte latency, high-concurrency allocator
-- **Headers OnceLock + serde_json/pythonize** — lazy header conversion, Rust-side JSON serialization
-- Full benchmark: [benchmarks/benchmark-14-linux.en.md](benchmarks/benchmark-14-linux.en.md)
+- **Sub-interpreter memory-leak root cause closed.** Unbounded RSS growth
+  under sustained load, present since v1.4.0, traced to cross-thread
+  `PyThreadState` reuse and fixed via `PyThreadState_New` per worker.
+  See `docs/advisor-triage-2026-04-19.md` and
+  [CHANGELOG](CHANGELOG.md#v150-2026-04-19) for the full writeup.
+- **Raw C-API `_PyreRequest` type** built via `PyType_FromSpec` with
+  a deterministic Rust-owned `tp_dealloc` — replaces the Python-class
+  stub, closes a CPython `subtype_dealloc` hazard, restores proper
+  `__del__` / `tp_finalize` semantics in sub-interp handlers.
+- **22 correctness / hygiene fixes** from an adversarial review pass
+  (C-API reentrancy, graceful shutdown, TOCTOU in static file serving,
+  CORS misconfig warnings, URL-decoded path params, async middleware
+  driving, …).
+- **Awaitable detection via `tp_as_async->am_await` pointer probe**
+  replaces the μs-level `PyObject_HasAttrString("__await__")`.
+- **Benchmark infrastructure split** — `just bench-record` / `bench-compare`
+  gate on a minimal plaintext target; `just bench-features` measures
+  the full demo; `just bench-tfb-plaintext` runs TechEmpower pipeline=16.
+- **Breaking:** `requires-python = ">=3.13"` (was `>=3.10`). Uses
+  `PyThreadState_GetUnchecked` added in CPython 3.13.
+
+Full benchmark (v1.4.0 baseline, unchanged methodology):
+[benchmarks/benchmark-14-linux.en.md](benchmarks/benchmark-14-linux.en.md)
 
 ### What others can't do, Pyre has built-in
 

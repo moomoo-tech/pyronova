@@ -1,5 +1,137 @@
 # Changelog
 
+## v1.5.0 (2026-04-19)
+
+Memory-leak root cause fix + hardening pass. Minor-bump because Python
+3.13+ is now required (dropped 3.10-3.12 support, see "Breaking").
+
+### Headline — sub-interpreter memory leak closed
+
+Pyre sub-interpreters had a long-standing unbounded RSS growth under
+sustained load (~128 B/req at 400k rps → OOM in ~10 min). Root cause
+isolated via a pure-C reproducer to cross-thread `PyThreadState` reuse:
+`SubInterpreterWorker::new` ran on the main thread, `Py_NewInterpreterFromConfig`
+bound the tstate to that OS thread, then the worker pthread attach/detached
+that tstate on every request. CPython's per-OS-thread tstate bookkeeping
+accumulates when the attaching thread differs from the creator — measured
+at ~1 KB per iteration in isolation.
+
+Fix (`fc45a7f`): new `rebind_tstate_to_current_thread` helper that each
+worker calls on entry. Creates a fresh tstate via `PyThreadState_New(interp)`
+bound to the worker's OS thread, swaps it in, and disposes of the creator
+tstate. All subsequent request dispatch runs against the thread-local
+tstate. **Measured result**: 73.8M requests @ 410k rps over 180s = total
+RSS growth of **4 MB** (0.057 B/req, below /proc sampling noise).
+
+Side effect: Python `__del__` / `tp_finalize` now fires correctly in
+sub-interp handlers (previously silently broken, was xfail'd).
+
+### Architecture — raw C-API `_PyreRequest` type
+
+Replaced the Python-defined `_PyreRequest` class with a custom heap
+type built via `PyType_FromSpec` + `PyMemberDef` in
+`src/pyre_request_type.rs`. Custom `tp_dealloc` synchronously DECREFs
+all seven slot fields. pyo3's `#[pyclass]` can't be used — pyo3 0.28
+hard-rejects sub-interpreters.
+
+Two invariants learned the hard way:
+
+- **No `Py_TPFLAGS_BASETYPE`**: Python subclassing triggers CPython's
+  `subtype_dealloc` fallback which silently bypasses our `tp_dealloc`.
+  Helper methods (`.text()`, `.json()`, `.body`, `.query_params`) are
+  monkey-patched onto the heap type at sub-interp init instead.
+- **No `Py_TPFLAGS_HAVE_GC`**: empirically made per-request leak 5×
+  worse. Our workload has no cycles; GC tracking costs without benefit.
+
+### Correctness & hygiene — 22 fixes triaged from adversarial review
+
+Full triage record (31 claims reviewed, 21 real / 10 rejected) lives in
+`docs/advisor-triage-2026-04-19.md`.
+
+C-API hygiene: `PyDict_Next` + `PyObject_Str` re-entrancy in
+`parse_sky_response`; `PyObject_IsInstance == 1` now handles `-1`
+(error); `py_str_dict` clears pending exceptions on OOM; `PyDict_SetItem`
+return value checked; `_PyreRequest.__init__` path type-checks dict
+slots via `PyDict_Check` before `PyDict_Clear`.
+
+Lifecycle: `LoopGuard` drop-after-`Py_Finalize` segfault fixed via
+`std::mem::forget`; Hyper graceful shutdown via `TaskTracker` waits
+up to 30s for in-flight connections before runtime drop (was
+RST-on-shutdown); `InterpreterPool::drop` bounds worker-thread join
+at 5s; `spawn_rss_sampler` JoinHandle now joined on shutdown;
+`WORKER_STATES` `OnceLock` → `RwLock<Vec>` so repeated `app.run()`
+gets fresh channels.
+
+WebSocket: async WS handlers now driven via `asyncio.run` (was
+silently dropped); explicit `drop(handler)` under GIL.
+
+Routing: path params URL-decoded (`/user/john%20doe` → `"john doe"`);
+async middleware coroutines driven through `resolve_coroutine` in
+both sub-interp and GIL-mode paths; CORS `origin="*"` + credentials
+emits W3C-violation warning.
+
+Static files: `canonicalize → File::open` TOCTOU closed via
+`O_NOFOLLOW` on Unix (refuses post-check symlink swap).
+
+### Performance
+
+Awaitable detection in `resolve_coroutine` moved from
+`PyObject_HasAttrString(obj, "__await__")` (μs per call — interns the
+string, walks the MRO, runs descriptor protocol) to a direct
+`Py_TYPE(obj)->tp_as_async->am_await` pointer probe (ns, L1-resident).
+
+### Benchmark
+
+Bench targets split cleanly. `benchmarks/bench_plaintext.py` (new,
+feature-light) is the target for `just bench-record` / `bench-compare`.
+`examples/hello.py` (restored to v1.4.0 content) is the feature demo,
+run via `just bench-features`. `just bench-tfb-plaintext` runs
+TechEmpower-style `wrk -t8 -c256 -d15s --pipeline 16`.
+
+Numbers (AMD Ryzen 7 7840HS, 8C/16T, Python 3.14.4, performance
+governor, wrk 4.1.0):
+
+| Workload | Config | Req/s |
+|---|---|---|
+| Plaintext baseline | `wrk -t4 -c100 -d10s` | **422,976** |
+| Feature demo | `wrk -t4 -c100 -d10s` on `hello.py` | 381,123 |
+| **TFB Plaintext** | `wrk -t8 -c256 -d15s --pipeline 16` | **902,213** |
+| TFB JSON (`/hello/{name}`) | `wrk -t8 -c512 -d15s` | ~536,000 |
+
+Plaintext baseline vs v1.4.0's published 419,730 on the same machine:
+**+0.8% — zero regression**. The ~10% gap on `hello.py` reflects the
+added cost of async-correct middleware + access log (intentional
+hygiene tax, opt-in).
+
+### Tests
+
+- `test_sustained_concurrent_load_no_leak` — 12s soak, fails if RSS
+  grows >15 MB. Regression guard for the tstate fix.
+- `test_subinterp_python_finalizers_fire` — xfail removed.
+- `test_capi_hygiene.py` — 5 tests (reentrancy, malformed init,
+  URL-decode, async hook, instancecheck raise).
+- `test_static_symlink_out_of_root_refused` — O_NOFOLLOW regression.
+- `worker_states_can_be_reinstalled` — Rust unit test for hot-reload
+  of sub-interp pool.
+- `TestClient(port=None)` auto-allocates port (new).
+- Port collision fixes (19878, 19883).
+
+Total: 235 passed / 2 full-suite runs / 0 flakes / 0 regressions.
+
+### Breaking
+
+- **`requires-python = ">=3.13"`** (was `>=3.10`). Users on 3.10-3.12
+  should stay on v1.4.x.
+
+### Deferred to future releases
+
+- SSE dedicated asyncio background thread.
+- `response_map` active-sweep GC for deadlocked-worker orphans.
+- PyBuffer-based zero-copy body write on the send path.
+- `query_params_all()` additive API for HPP-correct multivalue access.
+
+---
+
 ## v1.4.5 (2026-04-19)
 
 Security + correctness hardening from an adversarial review pass. 23 fixes
