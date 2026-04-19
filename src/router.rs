@@ -80,10 +80,19 @@ impl RouteTable {
         method: &str,
         path: &str,
     ) -> Option<(usize, Vec<(String, String)>)> {
-        // `insert` stores methods uppercased; lookup must do the same or
-        // a client sending `get` / `Get` will silently miss routes even
+        // `insert` stores methods uppercased; lookup must match — clients
+        // sending `get` / `Get` previously silently missed routes even
         // though HTTP methods are case-insensitive per RFC 9110 §9.1.
-        let router = self.routers.get(&method.to_uppercase())?;
+        //
+        // Fast path: hyper hands us canonical (already-uppercase) methods
+        // for every standard verb, so the vast majority of requests can
+        // reuse `method` without allocation. Only fall back to allocating
+        // a normalized copy when we actually see lowercase bytes.
+        let router = if method.bytes().any(|b| b.is_ascii_lowercase()) {
+            self.routers.get(&method.to_ascii_uppercase())?
+        } else {
+            self.routers.get(method)?
+        };
         let matched = router.at(path).ok()?;
         let params: Vec<(String, String)> = matched
             .params

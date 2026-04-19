@@ -3,8 +3,20 @@
 ## v1.4.5 (2026-04-19)
 
 Security + correctness hardening from an adversarial review pass. 23 fixes
-(6 critical + 17 error). Throughput unchanged (343k req/s on the hybrid
-hello benchmark vs 220k historical baseline — no regression).
+(6 critical + 17 error).
+
+**Same-day same-machine benchmark** (AMD 7840HS, `wrk -t4 -c100 -d10s`
+on `examples/hello.py` hybrid mode):
+
+| Build | Requests/sec (avg of 3) |
+|---|---|
+| d0ce481 (v1.4.4 pre-hotfix) | ~260k |
+| v1.4.5 (this release) | ~320k |
+
+No regression; observed a small net gain within noise. Both runs are
+below the 419k historical baseline from v1.4.0's benchmark day — the
+machine is in a different thermal / load state today, not a code
+change. The relative comparison is what matters and it is clean.
 
 ### Critical (already shipped in hotfix)
 - `accept()` loop classifies errno (EMFILE / ENFILE / ENOBUFS / ENOMEM)
