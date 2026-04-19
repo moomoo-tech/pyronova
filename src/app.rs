@@ -77,6 +77,30 @@ use crate::router::{FrozenRoutes, MutableRoutes, RouteTable};
 use crate::state::SharedState;
 use crate::websocket;
 
+/// Back off when accept() fails. Critical for EMFILE/ENFILE (file-descriptor
+/// exhaustion) — a bare `continue` on these errors spins the accept loop at
+/// 100% CPU because the next accept() call fails immediately. Sleeping a few
+/// hundred ms lets short-lived fds close and gives the OS room to recover.
+/// Transient per-connection errors (ECONNABORTED etc.) get a tiny yield to
+/// avoid degenerate tight loops without meaningfully delaying legitimate traffic.
+async fn handle_accept_error(e: &std::io::Error) {
+    let backoff_ms = match e.raw_os_error() {
+        Some(libc::EMFILE) | Some(libc::ENFILE) | Some(libc::ENOBUFS) | Some(libc::ENOMEM) => {
+            tracing::error!(
+                target: "pyre::server",
+                error = %e,
+                "accept() resource exhaustion — backing off 250ms",
+            );
+            250
+        }
+        _ => {
+            tracing::warn!(target: "pyre::server", error = %e, "accept() error");
+            10
+        }
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+}
+
 #[pyclass]
 pub(crate) struct PyreApp {
     routes: MutableRoutes,
@@ -408,7 +432,10 @@ impl PyreApp {
                                 result = listener.accept() => {
                                     let (stream, remote_addr) = match result {
                                         Ok(v) => v,
-                                        Err(_) => continue,
+                                        Err(e) => {
+                                            handle_accept_error(&e).await;
+                                            continue;
+                                        }
                                     };
                                     let routes = Arc::clone(&routes);
                                     let _ = stream.set_nodelay(true);
@@ -580,7 +607,10 @@ impl PyreApp {
                                 result = listener.accept() => {
                                     let (stream, remote_addr) = match result {
                                         Ok(v) => v,
-                                        Err(_) => continue,
+                                        Err(e) => {
+                                            handle_accept_error(&e).await;
+                                            continue;
+                                        }
                                     };
                                     let pool = Arc::clone(&pool);
                                     let routes = Arc::clone(&routes);

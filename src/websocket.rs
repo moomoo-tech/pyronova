@@ -33,32 +33,47 @@ pub(crate) struct PyreWebSocket {
 #[pymethods]
 impl PyreWebSocket {
     /// Receive next text message. Returns None if connection closed.
-    fn recv(&self) -> Option<String> {
-        let rx = self.incoming_rx.lock().unwrap();
-        loop {
-            match rx.recv().ok()? {
-                WsMsg::Text(s) => return Some(s),
-                WsMsg::Binary(_) => continue,
+    ///
+    /// Releases the GIL while blocking on the channel so other Python
+    /// threads (e.g. a second task reading from another ws, or the
+    /// application's worker threads) are not frozen. Holding the GIL
+    /// across a potentially unbounded channel wait is a single-threaded
+    /// Python server in disguise.
+    fn recv(&self, py: Python<'_>) -> Option<String> {
+        py.detach(|| {
+            let rx = self.incoming_rx.lock().unwrap();
+            loop {
+                match rx.recv().ok()? {
+                    WsMsg::Text(s) => return Some(s),
+                    WsMsg::Binary(_) => continue,
+                }
             }
-        }
+        })
     }
 
     /// Receive next binary message. Returns None if connection closed.
-    fn recv_bytes(&self) -> Option<Vec<u8>> {
-        let rx = self.incoming_rx.lock().unwrap();
-        loop {
-            match rx.recv().ok()? {
-                WsMsg::Binary(b) => return Some(b),
-                WsMsg::Text(_) => continue,
+    /// Releases the GIL while waiting — see `recv` for rationale.
+    fn recv_bytes(&self, py: Python<'_>) -> Option<Vec<u8>> {
+        py.detach(|| {
+            let rx = self.incoming_rx.lock().unwrap();
+            loop {
+                match rx.recv().ok()? {
+                    WsMsg::Binary(b) => return Some(b),
+                    WsMsg::Text(_) => continue,
+                }
             }
-        }
+        })
     }
 
     /// Receive next message as (type, data). type is "text" or "binary".
     /// Returns None if connection closed.
     fn recv_message<'py>(&self, py: Python<'py>) -> Option<(String, Py<PyAny>)> {
-        let rx = self.incoming_rx.lock().unwrap();
-        let msg = rx.recv().ok()?;
+        // Release the GIL across the blocking recv; re-acquire to build the
+        // Python-typed return value.
+        let msg = py.detach(|| {
+            let rx = self.incoming_rx.lock().unwrap();
+            rx.recv().ok()
+        })?;
         match msg {
             WsMsg::Text(s) => Some((
                 "text".to_string(),
@@ -273,6 +288,10 @@ where
     // Close WebSocket
     let _ = ws_sink.close().await;
 
-    // Wait for Python handler thread
-    let _ = py_handle.join();
+    // Wait for Python handler thread. `JoinHandle::join()` blocks, so
+    // calling it directly from this async fn would pin a Tokio worker
+    // thread until the Python handler finishes — a trivial DoS vector
+    // when a handler hangs. Dispatch to the blocking-thread pool so
+    // async workers stay free.
+    let _ = tokio::task::spawn_blocking(move || py_handle.join()).await;
 }

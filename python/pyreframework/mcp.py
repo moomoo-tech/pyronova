@@ -155,6 +155,14 @@ class MCPServer:
         except json.JSONDecodeError:
             return self._error_response(None, -32700, "Parse error")
 
+        # A valid JSON-RPC 2.0 request is an Object; primitives and arrays
+        # (the latter reserved for batch requests, which this server does
+        # not support) must be rejected with -32600 per the spec. Without
+        # this guard the .get() calls below raise AttributeError and the
+        # exception escapes handle_request entirely.
+        if not isinstance(req, dict):
+            return self._error_response(None, -32600, "Invalid Request")
+
         req_id = req.get("id")
         method = req.get("method", "")
         params = req.get("params", {})

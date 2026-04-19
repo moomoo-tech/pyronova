@@ -569,7 +569,36 @@ impl SubInterpreterWorker {
             return Err("Py_NewInterpreterFromConfig failed".to_string());
         }
 
-        // We are now in the sub-interpreter's thread state.
+        // Past this point we own a live sub-interpreter. Any early error
+        // must Py_EndInterpreter it before returning, or the sub-interp
+        // (and the thread resources it pins) leak permanently. Delegate
+        // init to a helper so `?` can short-circuit safely — we catch its
+        // Err here and perform cleanup regardless of which step failed.
+        match Self::init_in_sub_interp(script, script_path, func_names) {
+            Ok(worker) => {
+                ffi::PyThreadState_Swap(main_tstate);
+                Ok(worker)
+            }
+            Err(e) => {
+                ffi::Py_EndInterpreter(ffi::PyThreadState_Get());
+                ffi::PyThreadState_Swap(main_tstate);
+                Err(e)
+            }
+        }
+    }
+
+    /// Run every init step that executes INSIDE the freshly-created
+    /// sub-interpreter. Returns a worker whose `tstate` is already saved
+    /// via PyEval_SaveThread (GIL released). Caller is responsible for
+    /// swapping back to the main tstate, and for Py_EndInterpreter on error.
+    ///
+    /// # Safety
+    /// Must be called with a sub-interpreter's thread state current.
+    unsafe fn init_in_sub_interp(
+        script: &str,
+        script_path: &str,
+        func_names: &[String],
+    ) -> Result<Self, String> {
         // Run the bootstrap (from external .py file) + user script.
         let bootstrap_src = include_str!("../python/pyreframework/_bootstrap.py");
         let bootstrap = format!("{bootstrap_src}\n# Execute full user script\n{script}");
@@ -615,10 +644,8 @@ impl SubInterpreterWorker {
 
         if result.is_none() {
             ffi::PyErr_Print();
-            // globals dropped here → DECREF
-            // Destroy the orphaned sub-interpreter to avoid memory leak
-            ffi::Py_EndInterpreter(ffi::PyThreadState_Get());
-            ffi::PyThreadState_Swap(main_tstate);
+            // globals dropped here → DECREF. Outer `new()` destroys the
+            // sub-interpreter and swaps back to main once we return Err.
             return Err("failed to execute script in sub-interpreter".to_string());
         }
         // result dropped here → DECREF (it's just Py_None for exec)
@@ -702,11 +729,9 @@ impl SubInterpreterWorker {
         // Keep globals alive — transfer ownership to the struct
         let globals_ptr = globals.into_raw();
 
-        // Release this sub-interpreter's GIL
+        // Release this sub-interpreter's GIL. Outer `new()` swaps back to
+        // the main interpreter after we return.
         let saved = ffi::PyEval_SaveThread();
-
-        // Switch back to main interpreter
-        ffi::PyThreadState_Swap(main_tstate);
 
         Ok(SubInterpreterWorker {
             tstate: saved,
