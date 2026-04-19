@@ -92,8 +92,19 @@ fn resolve_coroutine(py: Python<'_>, obj: Py<PyAny>) -> Result<Py<PyAny>, String
     }
 
     let bound = obj.bind(py);
-    let is_coro = unsafe { pyo3::ffi::PyCoro_CheckExact(bound.as_ptr()) == 1 };
-    if !is_coro {
+    // Awaitable detection: PyCoro_CheckExact catches only `async def`
+    // native coroutines. Tasks, Futures, and custom async iterators with
+    // __await__ do NOT match but are legitimate things for a handler (or
+    // middleware) to return and expect the framework to drive. Using
+    // `inspect.isawaitable` catches all three.
+    let is_awaitable = unsafe { pyo3::ffi::PyCoro_CheckExact(bound.as_ptr()) == 1 }
+        || py
+            .import("inspect")
+            .and_then(|m| m.getattr("isawaitable"))
+            .and_then(|f| f.call1((bound,)))
+            .and_then(|r| r.extract::<bool>())
+            .unwrap_or(false);
+    if !is_awaitable {
         return Ok(obj);
     }
 
@@ -286,9 +297,23 @@ fn call_handler_with_hooks(
         };
 
         // before_request hooks
+        //
+        // Drive the hook return through resolve_coroutine — an `async def`
+        // middleware returns a coroutine that must be awaited, not treated
+        // as a live response. Without this, `!bound.is_none()` was true
+        // for the coroutine object and the framework returned
+        // "<coroutine object ...>" as a 200 body.
         for hook in before_hooks {
             match hook.call1(py, (sky_req.clone(),)) {
                 Ok(result) => {
+                    let result = match resolve_coroutine(py, result) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            return HandlerResult::Response(Err(format!(
+                                "before_request hook error: {e}"
+                            )))
+                        }
+                    };
                     let bound = result.bind(py);
                     if !bound.is_none() {
                         return HandlerResult::Response(extract_response_data(py, bound.clone()));
@@ -360,6 +385,10 @@ fn call_handler_with_hooks(
                         .map_err(|e| format!("failed to create PyreResponse: {e}"))?;
                         match hook.call1(py, (sky_req.clone(), current_resp)) {
                             Ok(result) => {
+                                // Resolve awaitables from async after_request
+                                // hooks — same reasoning as before_hooks.
+                                let result = resolve_coroutine(py, result)
+                                    .map_err(|e| format!("after_request hook error: {e}"))?;
                                 let bound = result.bind(py);
                                 if !bound.is_none() {
                                     resp_data = extract_response_data(py, bound.clone())?;

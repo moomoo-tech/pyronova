@@ -94,10 +94,22 @@ impl RouteTable {
             self.routers.get(method)?
         };
         let matched = router.at(path).ok()?;
+        // Path params from matchit are raw URI segments — percent-encoded.
+        // Every web framework's users expect `/user/{name}` + `/user/john%20doe`
+        // to yield `name = "john doe"`, not `"john%20doe"`. Decode here so
+        // Python handlers don't have to import urllib.parse for every route.
+        // Key names are route-template identifiers and are always ASCII;
+        // we only decode values.
         let params: Vec<(String, String)> = matched
             .params
             .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .map(|(k, v)| {
+                let decoded = percent_encoding::percent_decode_str(v)
+                    .decode_utf8()
+                    .map(|c| c.into_owned())
+                    .unwrap_or_else(|_| v.to_string());
+                (k.to_string(), decoded)
+            })
             .collect();
         Some((*matched.value, params))
     }

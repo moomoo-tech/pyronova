@@ -1097,16 +1097,26 @@ def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n   
         })
     }
 
-    /// If obj is a coroutine (async def), execute it via persistent event loop.
-    /// Otherwise return it unchanged.
+    /// If obj is awaitable (coroutine / Task / Future / custom __await__),
+    /// drive it via the persistent event loop. Otherwise return unchanged.
+    ///
+    /// Broader than the historical `PyCoro_CheckExact` — handlers/hooks
+    /// legitimately return `asyncio.create_task(...)` or user-defined
+    /// Awaitable objects, and treating those as live responses produced
+    /// `"<coroutine object ... at 0x...>"` strings in the HTTP body.
+    /// Fast-path PyCoro_CheckExact first (single tag compare), fall
+    /// through to `hasattr __await__` for the minority path.
     unsafe fn resolve_coroutine(&self, obj: PyObjRef) -> Result<PyObjRef, String> {
-        if ffi::PyCoro_CheckExact(obj.as_ptr()) != 1 {
-            return Ok(obj); // Not a coroutine, pass through
+        let is_coro = ffi::PyCoro_CheckExact(obj.as_ptr()) == 1;
+        let is_awaitable = is_coro
+            || ffi::PyObject_HasAttrString(obj.as_ptr(), c"__await__".as_ptr()) == 1;
+        if !is_awaitable {
+            return Ok(obj); // Plain value — pass through
         }
         if self.loop_run_func.is_null() {
             return Err("async handler used but asyncio event loop not available".to_string());
         }
-        // Call loop.run_until_complete(coroutine)
+        // Call loop.run_until_complete(awaitable)
         let args =
             PyObjRef::from_owned(ffi::PyTuple_New(1)).ok_or("failed to create args tuple")?;
         ffi::PyTuple_SetItem(args.as_ptr(), 0, obj.into_raw());
@@ -1408,9 +1418,14 @@ def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n   
                 ));
 
                 match hook_result {
-                    Some(r) if r.as_ptr() != ffi::Py_None() => {
-                        // Short-circuit
-                        return self.parse_result(r);
+                    Some(r) => {
+                        // Drive async hooks through the event loop so
+                        // `async def` middleware doesn't leak a bare
+                        // coroutine object as a "short-circuit response".
+                        let resolved = self.resolve_coroutine(r)?;
+                        if resolved.as_ptr() != ffi::Py_None() {
+                            return self.parse_result(resolved);
+                        }
                     }
                     None => {
                         // Hook raised an exception. We previously logged
@@ -1424,7 +1439,6 @@ def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n   
                             "before_request hook {hook_name:?} raised an exception"
                         ));
                     }
-                    _ => {}
                 }
             }
         }
@@ -1476,13 +1490,16 @@ def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n   
                     ));
 
                     match hook_result {
-                        Some(r) if r.as_ptr() != ffi::Py_None() => {
-                            response = self.parse_result(r)?;
+                        Some(r) => {
+                            // Drive async after_hooks through the event loop.
+                            let resolved = self.resolve_coroutine(r)?;
+                            if resolved.as_ptr() != ffi::Py_None() {
+                                response = self.parse_result(resolved)?;
+                            }
                         }
                         None => {
                             ffi::PyErr_Print();
                         }
-                        _ => {}
                     }
                 }
             }
@@ -1528,9 +1545,36 @@ impl Drop for InterpreterPool {
         // 2. Join all worker threads so they finish Py_EndInterpreter BEFORE
         //    the main interpreter tears down (Py_Finalize). Without this join,
         //    workers race against Py_Finalize and segfault.
+        //
+        // Bounded wait: user handlers can block indefinitely (e.g. a synchronous
+        // `requests.get` with no timeout). An unconditional .join() would hang
+        // the whole process on shutdown. Give each worker 5s to observe the
+        // channel close and run its Py_EndInterpreter cleanup; if it's stuck
+        // in user code past that, forget the thread. The process is exiting
+        // anyway — the OS reclaims memory. A stuck sub-interp leaks only
+        // what hasn't been freed yet, which is strictly better than hanging
+        // indefinitely.
         if let Some(threads) = self.worker_threads.take() {
+            const JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
             for t in threads {
-                let _ = t.join();
+                // std::thread::JoinHandle has no timed join, so we spin a
+                // short poll loop by checking is_finished(). is_finished()
+                // is a cheap atomic read.
+                let deadline = std::time::Instant::now() + JOIN_TIMEOUT;
+                while !t.is_finished() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                if t.is_finished() {
+                    let _ = t.join();
+                } else {
+                    tracing::warn!(
+                        target: "pyre::server",
+                        "worker thread did not exit within {:?} — abandoning (process shutdown in progress)",
+                        JOIN_TIMEOUT,
+                    );
+                    // Leak the JoinHandle — OS will reclaim at process exit.
+                    std::mem::forget(t);
+                }
             }
         }
     }
@@ -1688,10 +1732,17 @@ impl InterpreterPool {
             self.routers.get(method)?
         };
         let matched = router.at(path).ok()?;
+        // Decode percent-encoded path params — see router.rs for rationale.
         let params: Vec<(String, String)> = matched
             .params
             .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .map(|(k, v)| {
+                let decoded = percent_encoding::percent_decode_str(v)
+                    .decode_utf8()
+                    .map(|c| c.into_owned())
+                    .unwrap_or_else(|_| v.to_string());
+                (k.to_string(), decoded)
+            })
             .collect();
         Some((*matched.value, params))
     }

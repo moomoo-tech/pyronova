@@ -213,3 +213,145 @@ def test_handler_returns_weird_object_server_stays_up():
             assert r.status == 200
     finally:
         _kill(proc)
+
+
+# -----------------------------------------------------------------------------
+# Bug #26 — PyDict_Clear assumes dict type
+# -----------------------------------------------------------------------------
+#
+# `_PyreRequest.__init__` accepts 7 positional PyObject* args via
+# PyArg_ParseTuple "OOOOOOO" — no type checks. User code could stash a
+# string where a dict is expected. tp_dealloc previously called
+# PyDict_Clear unconditionally → segfault on non-dict slot.
+# Fix: PyDict_Check guard before PyDict_Clear.
+
+WRONG_TYPE_SERVER = """
+from pyreframework import Pyre
+import os
+
+app = Pyre()
+
+@app.get("/health")
+def health(req):
+    return {"ok": True}
+
+@app.get("/abuse")
+def abuse(req):
+    # Construct _PyreRequest with a string where headers dict is expected.
+    # Before the fix, tp_dealloc would PyDict_Clear the string → segfault.
+    from builtins import type as _type
+    try:
+        cls = _type(req)   # _PyreRequest class
+        # Build with a non-dict in the headers slot. params is also a dict slot.
+        bad = cls("GET", "/", {}, "", b"", "i am not a dict", "127.0.0.1")
+        # Let it drop — tp_dealloc runs the defended PyDict_Clear path.
+        del bad
+    except Exception:
+        pass
+    return {"ok": True}
+
+if __name__ == '__main__':
+    app.run(host='127.0.0.1', port=int(os.environ['PYRE_PORT']))
+"""
+
+
+def test_pyrerequest_constructed_with_wrong_types_does_not_crash():
+    port = 8933
+    proc = _launch(WRONG_TYPE_SERVER, port)
+    try:
+        for _ in range(50):
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/abuse", timeout=2):
+                    pass
+            except Exception:
+                pass
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as r:
+            assert r.status == 200
+    finally:
+        _kill(proc)
+
+
+# -----------------------------------------------------------------------------
+# Bug #22 — path params URL-decoded
+# -----------------------------------------------------------------------------
+
+URL_DECODE_SERVER = """
+from pyreframework import Pyre
+import json, os
+
+app = Pyre()
+
+@app.get("/health")
+def health(req):
+    return {"ok": True}
+
+@app.get("/user/{name}")
+def user(req):
+    return {"name": req.params["name"]}
+
+if __name__ == '__main__':
+    app.run(host='127.0.0.1', port=int(os.environ['PYRE_PORT']))
+"""
+
+
+def test_path_params_are_url_decoded():
+    port = 8934
+    proc = _launch(URL_DECODE_SERVER, port)
+    try:
+        # %20 → space
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/user/john%20doe", timeout=2) as r:
+            import json as _json
+            body = _json.loads(r.read())
+            assert body["name"] == "john doe", body
+        # %E4%B8%AD → 中 (UTF-8)
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/user/%E4%B8%AD%E6%96%87", timeout=2) as r:
+            import json as _json
+            body = _json.loads(r.read())
+            assert body["name"] == "中文", body
+    finally:
+        _kill(proc)
+
+
+# -----------------------------------------------------------------------------
+# Bug #27 — async before_request hook
+# -----------------------------------------------------------------------------
+
+ASYNC_HOOK_SERVER = """
+from pyreframework import Pyre
+import os
+
+app = Pyre()
+
+@app.get("/health")
+def health(req):
+    return {"ok": True}
+
+@app.before_request
+async def audit(req):
+    # Returning None (explicitly or implicitly) means "continue to handler".
+    # The coroutine must be driven — if the framework treated the coroutine
+    # object as a non-None response, it would short-circuit with
+    # "<coroutine object audit ...>".
+    return None
+
+@app.get("/hi")
+def hi(req):
+    return "hello"
+
+if __name__ == '__main__':
+    app.run(host='127.0.0.1', port=int(os.environ['PYRE_PORT']))
+"""
+
+
+def test_async_before_request_hook_does_not_short_circuit():
+    port = 8935
+    proc = _launch(ASYNC_HOOK_SERVER, port)
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/hi", timeout=2) as r:
+            body = r.read()
+            # Before the fix: body == b"<coroutine object audit at 0x...>"
+            # After the fix: the coroutine was awaited, returned None, main
+            # handler ran, body == "hello".
+            assert body == b"hello", body
+    finally:
+        _kill(proc)

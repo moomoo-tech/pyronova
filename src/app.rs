@@ -149,6 +149,22 @@ impl PyreApp {
         expose_headers: Option<String>,
         allow_credentials: bool,
     ) {
+        // W3C Fetch / CORS forbids `Access-Control-Allow-Origin: *`
+        // together with `Access-Control-Allow-Credentials: true` —
+        // browsers reject the response client-side regardless of
+        // what the server sends. The server still returns 200 which
+        // makes this a particularly nasty debugging pit (200 logs,
+        // client-visible failure). Warn at config time so the
+        // misconfiguration is visible in the logs where the user
+        // looks first.
+        if allow_credentials && origin.trim() == "*" {
+            tracing::warn!(
+                target: "pyre::server",
+                "CORS misconfiguration: origin=\"*\" with allow_credentials=true is rejected by all \
+                 major browsers (W3C Fetch spec). Configure a concrete origin (e.g. \"https://app.example.com\") \
+                 when credentials are enabled."
+            );
+        }
         self.cors_config = Some(crate::router::CorsConfig {
             origin,
             methods,
