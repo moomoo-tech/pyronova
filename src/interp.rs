@@ -370,99 +370,6 @@ unsafe extern "C" fn pyre_emit_log_cfunc(
 }
 
 // ---------------------------------------------------------------------------
-// SlotClearer — RAII guard that wipes a `_PyreRequest`'s slot values
-// ---------------------------------------------------------------------------
-//
-// Workaround for a CPython PEP 684 sub-interpreter finalizer bug: the
-// `tp_dealloc` path on heap-allocated types does NOT DECREF `__slots__`
-// members. Each request's _PyreRequest shell gets freed but the values
-// it held (headers dict, params dict, method str, path str, body bytes,
-// client_ip str, query str) orphan-leak in per-sub-interp PyMalloc
-// arenas — up to ~500 B/request in our hello bench.
-//
-// Using a Drop guard (rather than an inline cleanup block at the end of
-// `call_handler`) guarantees the clear runs on EVERY exit path —
-// including the `?` early-returns from `resolve_coroutine` and
-// `parse_result`, which the old inline code missed. The guard is
-// created immediately after `build_request` and released when the
-// enclosing scope ends, under the same sub-interp GIL that created the
-// object.
-
-pub(crate) struct SlotClearer {
-    ptr: *mut ffi::PyObject,
-}
-
-impl SlotClearer {
-    /// Attach to a `_PyreRequest` instance. Caller must hold the
-    /// sub-interpreter's GIL for the duration of this guard.
-    pub unsafe fn new(ptr: *mut ffi::PyObject) -> Self {
-        Self { ptr }
-    }
-}
-
-impl Drop for SlotClearer {
-    fn drop(&mut self) {
-        if self.ptr.is_null() {
-            return;
-        }
-        unsafe {
-            if ffi::PyThreadState_GetUnchecked().is_null() {
-                return;
-            }
-            // For dict slots: clear their contents first so the items
-            // (header strings etc.) get DECREF'd synchronously while
-            // the GIL is held. The sub-interp finalizer bug would
-            // otherwise leave them orphaned when the dict itself
-            // deallocs.
-            for attr in [c"headers", c"params"] {
-                let d = ffi::PyObject_GetAttrString(self.ptr, attr.as_ptr());
-                if d.is_null() {
-                    ffi::PyErr_Clear();
-                    continue;
-                }
-                if ffi::PyDict_Check(d) != 0 {
-                    ffi::PyDict_Clear(d);
-                }
-                ffi::Py_DECREF(d);
-                // Clear any error raised by PyDict_Clear so the next
-                // iteration and the DelAttr loop below both start
-                // clean. CPython's C API short-circuits on a pending
-                // exception — without this clear, a mid-loop failure
-                // would silently skip every subsequent call.
-                if !ffi::PyErr_Occurred().is_null() {
-                    ffi::PyErr_Clear();
-                }
-            }
-            // Assign None to each slot instead of DelAttrString.
-            // Under PEP 684 sub-interpreters, the slot-descriptor
-            // __delete__ path does not reliably DECREF the replaced
-            // value for non-container types (str, bytes), leaving the
-            // buffer orphaned. Assignment goes through __set__ which
-            // DECREFs the old value and stores the new None singleton
-            // — a code path we've verified works synchronously.
-            //
-            // Py_None is an immortal singleton; Py_INCREF here is a
-            // no-op in 3.12+ but included defensively.
-            let none = ffi::Py_None();
-            for attr in [
-                c"method",
-                c"path",
-                c"params",
-                c"query",
-                c"body_bytes",
-                c"headers",
-                c"client_ip",
-            ] {
-                let _ = ffi::PyObject_SetAttrString(self.ptr, attr.as_ptr(), none);
-                if !ffi::PyErr_Occurred().is_null() {
-                    ffi::PyErr_Clear();
-                }
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // PyObjRef — RAII wrapper for *mut ffi::PyObject
 // ---------------------------------------------------------------------------
 
@@ -680,7 +587,11 @@ struct SubInterpreterWorker {
     globals: *mut ffi::PyObject,
     /// Cached: json.dumps function pointer (avoids per-request import)
     json_dumps_func: *mut ffi::PyObject,
-    /// Cached: _PyreRequest class pointer
+    /// Cached: `_PyreRequest` **type object** (raw C-API heap type,
+    /// defined in `pyre_request_type.rs`). Built per sub-interp via
+    /// `PyType_FromSpec` so its custom `tp_dealloc` can synchronously
+    /// DECREF all slot fields — workaround for PEP 684's broken
+    /// per-instance dealloc path on `__slots__` Python classes.
     sky_request_cls: *mut ffi::PyObject,
     /// Cached: _PyreResponse class pointer
     sky_response_cls: *mut ffi::PyObject,
@@ -688,26 +599,6 @@ struct SubInterpreterWorker {
     _asyncio_loop: *mut ffi::PyObject,
     /// Cached: loop.run_until_complete method
     loop_run_func: *mut ffi::PyObject,
-    /// Recycled _PyreRequest instance.
-    ///
-    /// CPython's PEP 684 sub-interpreter dealloc path does not fully
-    /// reclaim per-instance PyMalloc memory for heap-allocated Python
-    /// classes — every request's `_PyreRequest` shell leaks ~100 B.
-    /// pyo3 itself rejects sub-interpreters (`"PyO3 modules do not
-    /// yet support subinterpreters"`), so we can't port to a Rust
-    /// `#[pyclass]`.
-    ///
-    /// Instead: construct ONE `_PyreRequest` per worker up-front and
-    /// re-populate its slots every request via `PyObject_SetAttrString`.
-    /// After the handler returns, `SlotClearer` wipes the slots (sets
-    /// them to None) so no request data persists between calls.
-    ///
-    /// Safety contract with user code: `req` is valid ONLY during the
-    /// handler's synchronous execution. Retaining it (e.g. stashing
-    /// in a list for background processing) will observe data from
-    /// later requests. `__slots__` on the Python side limits the
-    /// blast radius — users can't smuggle arbitrary attrs through.
-    cached_request: *mut ffi::PyObject,
 }
 
 unsafe impl Send for SubInterpreterWorker {}
@@ -831,12 +722,42 @@ impl SubInterpreterWorker {
             }
         }
 
-        // Cache frequently-used Python objects to avoid per-request lookups
+        // Build the raw C-API `_PyreRequest` type for THIS sub-interp
+        // (custom tp_dealloc that synchronously DECREFs every slot —
+        // workaround for PEP 684's broken heap-type finalizer). One
+        // type per sub-interp: PyTypeObject state is per-interp.
+        //
+        // We then install helper methods (`.text()`, `.json()`, `.body`,
+        // `.query_params`) DIRECTLY on the heap type — NOT via a
+        // Python subclass. A subclass triggers CPython's subtype_dealloc
+        // fallback and bypasses our custom tp_dealloc, restoring the
+        // full-instance leak we're trying to fix.
+        let rust_ty = crate::pyre_request_type::register_type()?;
         let req_cls_name = std::ffi::CString::new("_PyreRequest").unwrap();
-        let sky_request_cls = ffi::PyDict_GetItemString(globals.as_ptr(), req_cls_name.as_ptr());
-        if !sky_request_cls.is_null() {
-            ffi::Py_INCREF(sky_request_cls);
+        if ffi::PyDict_SetItemString(globals.as_ptr(), req_cls_name.as_ptr(), rust_ty) != 0 {
+            ffi::PyErr_Print();
+            return Err("failed to inject _PyreRequest into sub-interp globals".to_string());
         }
+
+        // Attach helper methods directly on the type (mutable by
+        // virtue of Py_TPFLAGS_HEAPTYPE). Users can do
+        // `req.text()` / `req.json()` / `req.body` / `req.query_params`.
+        let helpers_src = c"\
+def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n    import json as _json\n    t.body = property(lambda self: self.body_bytes)\n    t.query_params = property(lambda self: {k: v[0] for k, v in parse_qs(self.query).items()})\n    t.text = lambda self: self.body_bytes.decode('utf-8') if isinstance(self.body_bytes, (bytes, bytearray)) else str(self.body_bytes)\n    t.json = lambda self: _json.loads(self.text())\n_attach_pyre_request_helpers(_PyreRequest)\n";
+        let helpers_result = ffi::PyRun_String(
+            helpers_src.as_ptr(),
+            ffi::Py_file_input,
+            globals.as_ptr(),
+            globals.as_ptr(),
+        );
+        if helpers_result.is_null() {
+            ffi::PyErr_Print();
+            return Err("failed to attach _PyreRequest helper methods".to_string());
+        }
+        ffi::Py_DECREF(helpers_result);
+
+        let sky_request_cls = rust_ty;
+        ffi::Py_INCREF(sky_request_cls);
 
         let resp_cls_name = std::ffi::CString::new("_PyreResponse").unwrap();
         let sky_response_cls = ffi::PyDict_GetItemString(globals.as_ptr(), resp_cls_name.as_ptr());
@@ -911,26 +832,20 @@ impl SubInterpreterWorker {
             sky_response_cls,
             _asyncio_loop: asyncio_loop,
             loop_run_func,
-            cached_request: std::ptr::null_mut(),
         })
     }
 
-    /// Build or re-populate the per-worker `_PyreRequest` instance.
+    /// Build a fresh `_PyreRequest` instance for this request.
     ///
-    /// First call: constructs the instance via Vectorcall. Subsequent
-    /// calls: reuses the cached instance and updates each slot via
-    /// PyObject_SetAttrString. See `cached_request` doc on
-    /// `SubInterpreterWorker` for the rationale — one instance per
-    /// worker sidesteps the PEP 684 per-instance dealloc leak
-    /// (~100 B/request).
+    /// Returns a NEW owned reference (caller must DECREF). The
+    /// instance's `tp_dealloc` synchronously DECREFs all slot fields,
+    /// so no `SlotClearer` / instance recycling is needed.
     ///
     /// # Safety
-    /// Must be called with this sub-interpreter's GIL held. Caller
-    /// must NOT DECREF the returned pointer — ownership stays with
-    /// the worker struct.
+    /// Must be called with this sub-interpreter's GIL held.
     #[allow(clippy::too_many_arguments)]
     unsafe fn build_request(
-        &mut self,
+        &self,
         method: &str,
         path: &str,
         params: &[(String, String)],
@@ -947,70 +862,23 @@ impl SubInterpreterWorker {
         let py_headers = py_str_dict(headers).ok_or("failed to create py_headers")?;
         let py_client_ip = py_str(client_ip).ok_or("failed to create py_client_ip")?;
 
-        // First request on this worker: construct the cached instance.
-        if self.cached_request.is_null() {
-            let req_cls = self.sky_request_cls;
-            if req_cls.is_null() {
-                return Err("_PyreRequest class not found".to_string());
-            }
-            let args_arr = [
-                py_method.as_ptr(),
-                py_path.as_ptr(),
-                py_params.as_ptr(),
-                py_query.as_ptr(),
-                py_body.as_ptr(),
-                py_headers.as_ptr(),
-                py_client_ip.as_ptr(),
-            ];
-            let instance = ffi::PyObject_Vectorcall(
-                req_cls,
-                args_arr.as_ptr(),
-                args_arr.len(),
-                std::ptr::null_mut(),
-            );
-            // Vectorcall fallback to _PyObject_MakeTpCall in sub-interp
-            // leaks a ref per arg via its internal tuple; compensate.
-            for p in args_arr.iter() {
-                ffi::Py_DECREF(*p);
-            }
-            drop(py_method);
-            drop(py_path);
-            drop(py_params);
-            drop(py_query);
-            drop(py_body);
-            drop(py_headers);
-            drop(py_client_ip);
-            if instance.is_null() {
-                ffi::PyErr_Print();
-                return Err("failed to create _PyreRequest object".to_string());
-            }
-            self.cached_request = instance;
-            return Ok(instance);
+        if self.sky_request_cls.is_null() {
+            return Err("_PyreRequest type not registered".to_string());
         }
 
-        // Subsequent requests: update each slot in-place. SetAttr on a
-        // __slots__ class INCREFs the new value and DECREFs the old;
-        // we just need to hand it a PyObjRef whose Drop then undoes
-        // our caller-side +1. No new instance allocated → no per-
-        // request shell leak.
-        let req = self.cached_request;
-        let set = |name: &std::ffi::CStr, val: &PyObjRef| -> Result<(), String> {
-            if ffi::PyObject_SetAttrString(req, name.as_ptr(), val.as_ptr()) != 0 {
-                ffi::PyErr_Clear();
-                return Err(format!("SetAttr {:?} failed", name));
-            }
-            Ok(())
-        };
-        set(c"method", &py_method)?;
-        set(c"path", &py_path)?;
-        set(c"params", &py_params)?;
-        set(c"query", &py_query)?;
-        set(c"body_bytes", &py_body)?;
-        set(c"headers", &py_headers)?;
-        set(c"client_ip", &py_client_ip)?;
-        // Our PyObjRefs drop at fn end → each slot now has rc=1
-        // (owned by the cached instance's __slot__).
-        Ok(req)
+        // Transfer ownership of each new ref into the instance.
+        // `alloc_and_init` DECREFs them on failure — so we must NOT
+        // rely on PyObjRef::Drop after `into_raw()`.
+        crate::pyre_request_type::alloc_and_init(
+            self.sky_request_cls,
+            py_method.into_raw(),
+            py_path.into_raw(),
+            py_params.into_raw(),
+            py_query.into_raw(),
+            py_body.into_raw(),
+            py_headers.into_raw(),
+            py_client_ip.into_raw(),
+        )
     }
 
     /// Parse a handler return value into SubInterpResponse.
@@ -1341,18 +1209,15 @@ impl SubInterpreterWorker {
             .get(handler_name)
             .ok_or_else(|| format!("handler '{}' not found", handler_name))?;
 
-        // Ptr to the per-worker cached _PyreRequest; we don't own a
-        // reference, the worker struct does. build_request populates
-        // its slots in-place.
-        let request_ptr =
-            self.build_request(method, path, params, query, body, headers, client_ip)?;
-
-        // RAII guard: on ANY exit (normal, `?`, panic), wipe the
-        // cached request's slots — so no request data survives into
-        // the next handler call on this worker. This is also what
-        // gives the per-request leak its 0-growth property under the
-        // PEP 684 finalizer bug.
-        let _slot_guard = SlotClearer::new(request_ptr);
+        // Fresh `_PyreRequest` (new owned ref). The Rust-backed type's
+        // `tp_dealloc` synchronously DECREFs all slot fields when this
+        // PyObjRef drops at scope end — no SlotClearer / instance
+        // recycling needed, no PEP 684 finalizer bug to work around.
+        let request = PyObjRef::from_owned(
+            self.build_request(method, path, params, query, body, headers, client_ip)?,
+        )
+        .ok_or("build_request returned null")?;
+        let request_ptr = request.as_ptr();
 
         // Run before_request hooks
         for hook_name in before_hook_names {
@@ -1800,12 +1665,6 @@ fn worker_thread_loop(
     unsafe {
         if !worker.tstate.is_null() {
             ffi::PyEval_RestoreThread(worker.tstate);
-            // Release the cached _PyreRequest if we ever created one.
-            // Must happen under the sub-interp GIL, before Py_EndInterpreter.
-            if !worker.cached_request.is_null() {
-                ffi::Py_DECREF(worker.cached_request);
-                worker.cached_request = std::ptr::null_mut();
-            }
             ffi::Py_EndInterpreter(ffi::PyThreadState_Get());
             worker.tstate = std::ptr::null_mut();
         }

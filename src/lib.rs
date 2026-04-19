@@ -9,6 +9,7 @@ mod json;
 mod leak_detect;
 mod logging;
 mod monitor;
+mod pyre_request_type;
 mod response;
 mod router;
 mod state;
@@ -30,6 +31,21 @@ fn workrequest_counts() -> (u64, u64) {
     (interp::WorkRequest::created_count(), interp::WorkRequest::dropped_count())
 }
 
+#[cfg(feature = "leak_detect")]
+#[pyo3::pyfunction]
+fn pyre_request_counts() -> (usize, usize) {
+    (
+        pyre_request_type::ALLOC_COUNT.load(std::sync::atomic::Ordering::Relaxed),
+        pyre_request_type::DEALLOC_COUNT.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+#[cfg(feature = "leak_detect")]
+#[pyo3::pyfunction]
+fn pyre_slot_rc_report() -> String {
+    pyre_request_type::slot_rc_report()
+}
+
 #[pymodule]
 fn engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<app::PyreApp>()?;
@@ -42,6 +58,10 @@ fn engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(pyo3::wrap_pyfunction!(logging::init_logger, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(logging::emit_python_log, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(workrequest_counts, m)?)?;
+    #[cfg(feature = "leak_detect")]
+    m.add_function(pyo3::wrap_pyfunction!(pyre_request_counts, m)?)?;
+    #[cfg(feature = "leak_detect")]
+    m.add_function(pyo3::wrap_pyfunction!(pyre_slot_rc_report, m)?)?;
     #[cfg(feature = "leak_detect")]
     m.add_function(pyo3::wrap_pyfunction!(leak_detect_dump, m)?)?;
     Ok(())
