@@ -2,8 +2,8 @@
   "machine": "AMD Ryzen 7 7840HS w/ Radeon 780M Graphics",
   "kernel": "7.0.0-10-generic",
   "python": "3.14.4",
-  "recorded_at": "2026-04-19T21:34:24Z",
+  "recorded_at": "2026-04-19T22:20:05Z",
   "routes": {
-    "GET /": { "req_per_sec": 381234 }
+    "GET /": { "req_per_sec": 422976 }
   }
 }

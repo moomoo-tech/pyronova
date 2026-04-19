@@ -53,7 +53,7 @@ test: test-rust test-py
 bench-record: build-release
     #!/usr/bin/env bash
     set -euo pipefail
-    nohup .venv/bin/python examples/hello.py > /tmp/pyre_bench_srv.log 2>&1 &
+    nohup .venv/bin/python benchmarks/bench_plaintext.py > /tmp/pyre_bench_srv.log 2>&1 &
     pid=$!
     trap "kill $pid 2>/dev/null || true" EXIT
     # Wait for server
@@ -92,7 +92,7 @@ bench-compare: build-release
     if [[ ! -f benchmarks/baseline.json ]]; then
       echo "no baseline — run 'just bench-record' first"; exit 1
     fi
-    nohup .venv/bin/python examples/hello.py > /tmp/pyre_bench_srv.log 2>&1 &
+    nohup .venv/bin/python benchmarks/bench_plaintext.py > /tmp/pyre_bench_srv.log 2>&1 &
     pid=$!
     trap "kill $pid 2>/dev/null || true" EXIT
     for i in {1..40}; do
@@ -114,6 +114,58 @@ bench-compare: build-release
       exit 1
     fi
     echo "OK"
+
+# Bench the full-feature demo (examples/hello.py — enable_logging +
+# CORS after_request hook + multiple routes). Captures the realistic
+# cost of middleware + access logging on top of the engine. Compare
+# against bench-record's plaintext-only number to see the hygiene tax.
+# Not a release gate — throughput here is expected to be 5-10% lower.
+bench-features: build-release
+    #!/usr/bin/env bash
+    set -euo pipefail
+    nohup .venv/bin/python examples/hello.py > /tmp/pyre_bench_srv.log 2>&1 &
+    pid=$!
+    trap "kill $pid 2>/dev/null || true" EXIT
+    for i in {1..40}; do
+      curl -s http://127.0.0.1:8000/ >/dev/null 2>&1 && break
+      sleep 0.25
+    done
+    # Warm + 3 measurement runs, take the best
+    wrk -t4 -c100 -d3s http://127.0.0.1:8000/ >/dev/null 2>&1
+    best=0
+    for _ in 1 2 3; do
+      rps=$(wrk -t4 -c100 -d10s http://127.0.0.1:8000/ 2>&1 | awk '/Requests\/sec:/ {print int($2)}')
+      (( rps > best )) && best=$rps
+    done
+    printf 'full-feature (hello.py with logging + CORS hook): %d req/s\n' "$best"
+
+# TechEmpower-style plaintext bench with HTTP pipelining depth 16.
+# Uses wrk's shipped pipeline.lua (or our inline script) to issue
+# batched requests — the canonical TFB "Plaintext" configuration.
+bench-tfb-plaintext: build-release
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p /tmp/pyre_tfb
+    cat > /tmp/pyre_tfb/pipeline.lua <<'LUA'
+    init = function(args)
+      local depth = tonumber(args[1]) or 16
+      local r = {}
+      for i = 1, depth do r[i] = wrk.format("GET", "/") end
+      req = table.concat(r)
+    end
+    request = function() return req end
+    LUA
+    nohup .venv/bin/python benchmarks/bench_plaintext.py > /tmp/pyre_bench_srv.log 2>&1 &
+    pid=$!
+    trap "kill $pid 2>/dev/null || true" EXIT
+    for i in {1..40}; do
+      curl -s http://127.0.0.1:8000/ >/dev/null 2>&1 && break
+      sleep 0.25
+    done
+    # Warm
+    wrk -t8 -c256 -d5s --script /tmp/pyre_tfb/pipeline.lua http://127.0.0.1:8000/ -- 16 >/dev/null 2>&1
+    echo "--- TFB Plaintext: -t8 -c256 -d15s --pipeline 16 ---"
+    wrk -t8 -c256 -d15s --script /tmp/pyre_tfb/pipeline.lua --latency http://127.0.0.1:8000/ -- 16 | tail -12
 
 # ─── Leak soak ──────────────────────────────────────────────────
 
@@ -209,5 +261,5 @@ pre-push: check test bench-compare
 # Clean bench / leak artifacts, but keep the baseline file.
 clean-bench:
     rm -f /tmp/pyre_bench_srv.log /tmp/pyre_canary.stderr /tmp/pyre_canary.histogram /tmp/pyre_canary_srv.py
-    pkill -f "examples/hello.py" 2>/dev/null || true
+    pkill -f "benchmarks/bench_plaintext.py" 2>/dev/null || true
     pkill -f "pyre_canary_srv" 2>/dev/null || true

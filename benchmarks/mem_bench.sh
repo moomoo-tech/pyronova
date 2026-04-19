@@ -56,7 +56,7 @@ sample_rss() {
 # --- SkyTrade ---
 echo ""
 echo ">>> Starting SkyTrade Engine on :8000 ..."
-python examples/hello.py &
+python benchmarks/bench_plaintext.py &
 SKY_PID=$!
 sleep 2
 
