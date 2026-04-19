@@ -431,6 +431,15 @@ impl PyreApp {
                 #[cfg(not(target_os = "linux"))]
                 let n_accept = 1;
                 let shutdown_token = tokio_util::sync::CancellationToken::new();
+                // TaskTracker: collects every per-connection spawn so we can
+                // `.wait()` for them on shutdown. Without this, `rt.block_on`
+                // returning after `shutdown_token.cancel()` drops the Tokio
+                // Runtime, which aborts every spawned connection mid-request
+                // (clients see TCP RST). graceful_shutdown() on each conn is
+                // necessary but insufficient — it only signals hyper to stop
+                // accepting NEW keep-alive requests; the drain still needs
+                // time on the runtime.
+                let conn_tracker = tokio_util::task::TaskTracker::new();
 
                 for _ in 0..n_accept {
                     let std_listener = create_reuseport_listener(addr).map_err(|e| {
@@ -441,6 +450,7 @@ impl PyreApp {
                     })?;
                     let routes = Arc::clone(&routes);
                     let token = shutdown_token.clone();
+                    let tracker = conn_tracker.clone();
 
                     tokio::spawn(async move {
                         loop {
@@ -459,7 +469,7 @@ impl PyreApp {
                                     let io = TokioIo::new(stream);
 
                                     let conn_token = token.clone();
-                                    tokio::spawn(async move {
+                                    tracker.spawn(async move {
                                         let svc = service_fn(move |req: Request<Incoming>| {
                                             let routes = Arc::clone(&routes);
                                             let client_ip_addr = remote_addr.ip();
@@ -512,6 +522,20 @@ impl PyreApp {
                 println!("\n  Shutting down gracefully...");
                 crate::monitor::stop_rss_sampler();
                 shutdown_token.cancel();
+                // Close the tracker (no more spawns) and wait for every
+                // in-flight connection to finish its hyper drain. Bound
+                // the wait at 30 s so a pathological client can't hold
+                // shutdown hostage forever.
+                conn_tracker.close();
+                const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+                if let Err(_) = tokio::time::timeout(DRAIN_TIMEOUT, conn_tracker.wait()).await {
+                    tracing::warn!(
+                        target: "pyre::server",
+                        "{} in-flight connections did not drain within {:?} — exiting anyway",
+                        conn_tracker.len(),
+                        DRAIN_TIMEOUT,
+                    );
+                }
 
                 Ok(())
             })
@@ -622,6 +646,8 @@ impl PyreApp {
                 #[cfg(not(target_os = "linux"))]
                 let n_accept = 1;
                 let shutdown_token = tokio_util::sync::CancellationToken::new();
+                // See comment in run_gil — same contract.
+                let conn_tracker = tokio_util::task::TaskTracker::new();
 
                 for _ in 0..n_accept {
                     let std_listener = create_reuseport_listener(addr).map_err(|e| {
@@ -633,6 +659,7 @@ impl PyreApp {
                     let pool = Arc::clone(&pool);
                     let routes = Arc::clone(&routes);
                     let token = shutdown_token.clone();
+                    let tracker = conn_tracker.clone();
 
                     tokio::spawn(async move {
                         loop {
@@ -652,7 +679,7 @@ impl PyreApp {
                                     let io = TokioIo::new(stream);
 
                                     let conn_token = token.clone();
-                                    tokio::spawn(async move {
+                                    tracker.spawn(async move {
                                         let svc = service_fn(move |req: Request<Incoming>| {
                                             let pool = Arc::clone(&pool);
                                             let routes = Arc::clone(&routes);
@@ -702,6 +729,16 @@ impl PyreApp {
                 println!("\n  Shutting down gracefully...");
                 crate::monitor::stop_rss_sampler();
                 shutdown_token.cancel();
+                conn_tracker.close();
+                const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+                if let Err(_) = tokio::time::timeout(DRAIN_TIMEOUT, conn_tracker.wait()).await {
+                    tracing::warn!(
+                        target: "pyre::server",
+                        "{} in-flight connections did not drain within {:?} — exiting anyway",
+                        conn_tracker.len(),
+                        DRAIN_TIMEOUT,
+                    );
+                }
 
                 Ok(())
             })
