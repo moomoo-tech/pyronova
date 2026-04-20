@@ -4,7 +4,43 @@ A narrative walkthrough of how we found and (partially) fixed a long-standing
 memory leak specific to Pyre's sub-interpreter mode. Written in the order
 hypotheses were formed, tested, accepted, or rejected.
 
-## TL;DR
+## Status: CLOSED 2026-04-19 (commit `fc45a7f`, shipped in v1.5.0)
+
+**Root cause was not any of the Python-side object lifetime issues investigated
+in sessions 1–3.** Those workarounds (Vectorcall, SlotClearer, PyDict_Clear)
+masked symptoms of a lower-level bug: **sub-interpreter `PyThreadState` was
+created on the main OS thread and reused by worker OS threads**. CPython's
+tstate carries per-thread bookkeeping (GIL reacquisition counters, TLS caches,
+finalizer tracking) that accumulates ~1 KB every time it's attached/detached
+from a thread other than its creator. At 400k rps that's ~400 MB/s leaked.
+
+**Fix**: 13-line `rebind_tstate_to_current_thread` helper in `src/interp.rs`.
+Each worker thread calls `PyThreadState_New(interp)` once at start-of-loop,
+so every subsequent attach/detach is thread-local. Pure-C reproducer confirmed
+SHARED tstate = 997 B/iter, FRESH tstate = 0 B/iter.
+
+**Final numbers (post-fix, sustained 180s bench)**:
+- 410k rps, 73.8 M requests, 4 MB total RSS growth → **0.057 B/req** (noise)
+- Latency: p50 214 μs, p99 769 μs
+- Python `__del__` / `tp_finalize` now fires in sub-interp handlers (was
+  silently broken; the test was xfail'd before the fix)
+- Throughput +2–3% at 400k rps (stable tstate avoids per-iter reacquisition)
+
+**Follow-up (`a2af648`)**: the `PyDict_Clear` workaround in `tp_dealloc` was
+removed. Under the fixed tstate, `dict_dealloc` correctly DECREFs its contents
+on its own. Also bumped `requires-python` to ≥3.13 (we now depend on
+`PyThreadState_GetUnchecked`).
+
+**Sessions 1–3 below are preserved as historical narrative.** They document
+real framework-hardening (RAII `SlotClearer`, Vectorcall on the hot path,
+`PyErr_Clear` between slot ops) that survives in the codebase, but none of
+those were the leak. See `retro_pyre_leak_investigation.md` in the arc memory
+system for the retrospective on why the investigation took 3 days instead of
+3 hours.
+
+---
+
+## Original investigation TL;DR (pre-fix)
 
 - Hybrid / sub-interpreter mode leaked **every request's `_PyreRequest`** plus
   its `headers` and `params` dicts. ~0.75 KB / request of linear RSS growth.
@@ -14,9 +50,9 @@ hypotheses were formed, tested, accepted, or rejected.
   with `PyObject_Vectorcall(handler, stack_array, 1, NULL)` on the hot
   request path. `_PyreRequest` objects now decref properly (0 alive after
   bench, vs 1M+ before).
-- **Not yet fixed**: the same substitution on the `_PyreRequest` class
-  constructor did NOT stop the dict leak (still ~2 dicts / request). The
-  root cause for this second leak is still open.
+- **Not yet fixed** *(at time of writing — closed by `fc45a7f`)*: the same
+  substitution on the `_PyreRequest` class constructor did NOT stop the dict
+  leak (still ~2 dicts / request).
 - Also fixed a subtly related bug in `PyObjRef::Drop` that used
   `PyGILState_Check()` (returns 0 in non-main interpreters) instead of a
   sub-interp-aware tstate probe.
@@ -474,3 +510,66 @@ Current release gate: the 700 B/req ceiling in
 `test_rss_growth_per_request_is_bounded` is currently xfail. Once any
 of the strategies above brings steady-state growth under 50 B/req we
 flip it to a hard-pass gate.
+
+## Session 4 — root cause found, closed
+
+None of the workaround strategies above was needed. The ~316 B/req floor
+had the same cause as the original leak: **cross-thread `PyThreadState`
+reuse.** Confirmed with three pure-C reproducers isolating OS-thread
+layout from every other variable:
+
+```
+A. main thread creates sub-interp, main thread does the work loop       → 0   B/iter
+B. main thread creates sub-interp, pthread'd worker does the work loop  → 997 B/iter (SHARED tstate)
+C. main thread creates sub-interp, worker calls PyThreadState_New first → 0   B/iter (FRESH tstate)
+```
+
+Program A being clean is why `repro.c` on the main thread showed 0 leak
+in session 1 and we concluded "CPython is fine." That conclusion was
+wrong — it only excluded the main-thread path. The OS-thread variable
+was the one that mattered. (See retro memory for the debug-path
+post-mortem.)
+
+**Fix landed in `fc45a7f`**: `rebind_tstate_to_current_thread` called
+once at the top of each worker thread's loop, covering both
+`worker_thread_loop` (sync) and `worker_thread_loop_async`:
+
+```rust
+// 1. Attach the creator tstate (gets us into the sub-interp).
+// 2. PyThreadState_New(interp) — fresh tstate bound to THIS OS thread.
+// 3. PyThreadState_Swap(fresh) — make it current.
+// 4. PyThreadState_Clear + PyThreadState_Delete the creator tstate.
+// 5. PyEval_SaveThread() — release GIL, return the fresh tstate.
+```
+
+### Test updates
+
+- `test_rss_growth_per_request_is_bounded` — xfail removed, ceiling
+  tightened from 900 B/req to 200 B/req (hard pass gate).
+- `test_subinterp_python_finalizers_fire` — xfail removed, passes.
+- `d8b4ee2` adds a sustained-concurrent-load regression guard.
+
+### Workarounds removed
+
+- `a2af648` dropped the `PyDict_Clear` workaround from
+  `src/pyre_request_type.rs` `tp_dealloc`. Under fixed tstate, normal
+  `dict_dealloc` DECREFs correctly on its own.
+- Same commit bumps `requires-python` to ≥3.13 (we depend on
+  `PyThreadState_GetUnchecked` from the tstate rebind).
+- `1e09a45` removed the unused Python `_PyreRequest` mock class.
+
+### Workarounds kept (net positive)
+
+- **Vectorcall on the handler hot path** (`e1398df`) — one fewer tuple
+  allocation per request, strictly faster.
+- **Raw C-API heap type for `_PyreRequest`** (`d4bce1c`) — deterministic
+  `tp_dealloc`, avoids pure-Python class overhead.
+- **RAII `SlotClearer` + per-iter `PyErr_Clear`** (`100bca1`) — still
+  worth it as defense-in-depth; covers early-return paths.
+- **`PyObjRef::Drop` using `PyThreadState_GetUnchecked`** — the original
+  `PyGILState_Check` was always wrong for sub-interps; the new probe
+  is sub-interp-aware.
+
+### Release
+
+Shipped as **v1.5.0** (`d324a0d`). The 3-day investigation is closed.
