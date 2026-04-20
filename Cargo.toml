@@ -53,6 +53,10 @@ libc = "0.2"
 pythonize = "0.28"
 flate2 = "1"
 brotli = "7"
+tokio-rustls = "0.26"
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "logging", "tls12"] }
+rustls-pemfile = "2"
+pin-project-lite = "0.2"
 
 # Optional — pulled in only by the `leak_detect` feature.
 metrics = { version = "0.24", optional = true }

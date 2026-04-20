@@ -16,6 +16,7 @@ mod router;
 mod state;
 mod static_fs;
 mod stream;
+mod tls;
 mod types;
 mod websocket;
 

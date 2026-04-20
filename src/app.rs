@@ -314,7 +314,11 @@ impl PyreApp {
         Ok(())
     }
 
-    #[pyo3(signature = (host=None, port=None, workers=None, mode=None, io_workers=None))]
+    #[pyo3(signature = (
+        host=None, port=None, workers=None, mode=None, io_workers=None,
+        tls_cert=None, tls_key=None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
     fn run(
         &self,
         py: Python<'_>,
@@ -323,6 +327,8 @@ impl PyreApp {
         workers: Option<usize>,
         mode: Option<&str>,
         io_workers: Option<usize>,
+        tls_cert: Option<&str>,
+        tls_key: Option<&str>,
     ) -> PyResult<()> {
         // Start RSS sampler (once, opt-in via PYRE_METRICS=1).
         // GIL contention is now measured passively on the request path —
@@ -382,10 +388,33 @@ impl PyreApp {
             })
         };
 
+        // Build TLS acceptor once at startup if both paths are provided.
+        // Either both or neither — single path is a configuration error.
+        let tls_acceptor = match (tls_cert, tls_key) {
+            (Some(cert), Some(key)) => Some(
+                crate::tls::build_acceptor(cert, key)
+                    .map_err(pyo3::exceptions::PyValueError::new_err)?,
+            ),
+            (None, None) => None,
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "tls_cert and tls_key must be provided together",
+                ))
+            }
+        };
+
         if mode == "subinterp" || mode == "auto" {
-            self.run_subinterp(py, addr, workers, io_workers, num_cpus, frozen)
+            self.run_subinterp(
+                py,
+                addr,
+                workers,
+                io_workers,
+                num_cpus,
+                frozen,
+                tls_acceptor,
+            )
         } else {
-            self.run_gil(py, addr, io_workers, num_cpus, frozen)
+            self.run_gil(py, addr, io_workers, num_cpus, frozen, tls_acceptor)
         }
     }
 }
@@ -430,7 +459,13 @@ impl PyreApp {
         io_workers: usize,
         num_cpus: usize,
         routes: FrozenRoutes,
+        tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
     ) -> PyResult<()> {
+        let scheme = if tls_acceptor.is_some() {
+            "https"
+        } else {
+            "http"
+        };
         tracing::info!(
             target: "pyre::server",
             version = env!("CARGO_PKG_VERSION"),
@@ -438,10 +473,11 @@ impl PyreApp {
             io_workers,
             cpus = num_cpus,
             mode = "gil",
+            tls = tls_acceptor.is_some(),
             "Pyre started"
         );
         println!("\n  Pyre v{}", env!("CARGO_PKG_VERSION"));
-        println!("  Listening on http://{addr}");
+        println!("  Listening on {scheme}://{addr}");
         println!("  IO workers: {io_workers} (CPUs: {num_cpus})\n");
 
         py.detach(move || -> PyResult<()> {
@@ -482,6 +518,7 @@ impl PyreApp {
                     let routes = Arc::clone(&routes);
                     let token = shutdown_token.clone();
                     let tracker = conn_tracker.clone();
+                    let tls_acc = tls_acceptor.clone();
 
                     tokio::spawn(async move {
                         loop {
@@ -497,10 +534,25 @@ impl PyreApp {
                                     let routes = Arc::clone(&routes);
                                     let _ = stream.set_nodelay(true);
                                     setup_tcp_quickack(&stream);
-                                    let io = TokioIo::new(stream);
 
                                     let conn_token = token.clone();
+                                    let tls_acc_c = tls_acc.clone();
                                     tracker.spawn(async move {
+                                        // TLS handshake happens here (inside the
+                                        // spawned connection task) so it doesn't
+                                        // block the accept loop from taking more
+                                        // connections.
+                                        let tls_stream = match tls_acc_c {
+                                            Some(acc) => match crate::tls::wrap_tls(&acc, stream).await {
+                                                Ok(s) => s,
+                                                Err(e) => {
+                                                    tracing::warn!(target: "pyre::server", error = %e, "TLS handshake failed");
+                                                    return;
+                                                }
+                                            },
+                                            None => crate::tls::wrap_plain(stream),
+                                        };
+                                        let io = TokioIo::new(tls_stream);
                                         let svc = service_fn(move |req: Request<Incoming>| {
                                             let routes = Arc::clone(&routes);
                                             let client_ip_addr = remote_addr.ip();
@@ -573,6 +625,7 @@ impl PyreApp {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_subinterp(
         &self,
         py: Python<'_>,
@@ -581,6 +634,7 @@ impl PyreApp {
         io_workers: usize,
         num_cpus: usize,
         routes: FrozenRoutes,
+        tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
     ) -> PyResult<()> {
         let script_path = if let Some(ref p) = self.script_path {
             p.clone()
@@ -627,7 +681,12 @@ impl PyreApp {
             "\n  Pyre v{} [{mode_label} mode]",
             env!("CARGO_PKG_VERSION")
         );
-        println!("  Listening on http://{addr}");
+        let scheme = if tls_acceptor.is_some() {
+            "https"
+        } else {
+            "http"
+        };
+        println!("  Listening on {scheme}://{addr}");
         println!("  Sub-interpreters: {workers} | IO threads: {io_workers} (CPUs: {num_cpus})");
         if has_async {
             let sync_w = workers - (workers / 2).max(2);
@@ -691,6 +750,7 @@ impl PyreApp {
                     let routes = Arc::clone(&routes);
                     let token = shutdown_token.clone();
                     let tracker = conn_tracker.clone();
+                    let tls_acc = tls_acceptor.clone();
 
                     tokio::spawn(async move {
                         loop {
@@ -707,10 +767,21 @@ impl PyreApp {
                                     let routes = Arc::clone(&routes);
                                     let _ = stream.set_nodelay(true);
                                     setup_tcp_quickack(&stream);
-                                    let io = TokioIo::new(stream);
 
                                     let conn_token = token.clone();
+                                    let tls_acc_c = tls_acc.clone();
                                     tracker.spawn(async move {
+                                        let tls_stream = match tls_acc_c {
+                                            Some(acc) => match crate::tls::wrap_tls(&acc, stream).await {
+                                                Ok(s) => s,
+                                                Err(e) => {
+                                                    tracing::warn!(target: "pyre::server", error = %e, "TLS handshake failed");
+                                                    return;
+                                                }
+                                            },
+                                            None => crate::tls::wrap_plain(stream),
+                                        };
+                                        let io = TokioIo::new(tls_stream);
                                         let svc = service_fn(move |req: Request<Incoming>| {
                                             let pool = Arc::clone(&pool);
                                             let routes = Arc::clone(&routes);

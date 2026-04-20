@@ -588,6 +588,8 @@ class Pyre:
         mode: str | None = None,
         reload: bool = False,
         io_workers: int | None = None,
+        tls_cert: str | None = None,
+        tls_key: str | None = None,
     ) -> None:
         """Start the Pyre server.
 
@@ -595,12 +597,17 @@ class Pyre:
             workers: Python sub-interpreter count (default: CPU count).
             io_workers: Tokio async I/O thread count + accept loop count
                         (default: CPU count). Independent of workers.
+            tls_cert: Path to PEM certificate chain (enables HTTPS).
+                      Required together with ``tls_key``. Default None → plain HTTP.
+            tls_key:  Path to PEM private key. Required together with ``tls_cert``.
         """
         # Priority: param > env var > default
         host = host or os.environ.get("PYRE_HOST", "127.0.0.1")
         port = port or int(os.environ.get("PYRE_PORT", "8000"))
         workers = workers or (int(os.environ.get("PYRE_WORKERS")) if os.environ.get("PYRE_WORKERS") else None)
         io_workers = io_workers or (int(os.environ.get("PYRE_IO_WORKERS")) if os.environ.get("PYRE_IO_WORKERS") else None)
+        tls_cert = tls_cert or os.environ.get("PYRE_TLS_CERT")
+        tls_key = tls_key or os.environ.get("PYRE_TLS_KEY")
 
         # Hot reload: watch .py files, restart on change
         reload = reload or os.environ.get("PYRE_RELOAD") == "1"
@@ -661,7 +668,15 @@ class Pyre:
             hook()
 
         try:
-            self._engine.run(host=host, port=port, workers=workers, mode=mode, io_workers=io_workers)
+            self._engine.run(
+                host=host,
+                port=port,
+                workers=workers,
+                mode=mode,
+                io_workers=io_workers,
+                tls_cert=tls_cert,
+                tls_key=tls_key,
+            )
         finally:
             # Run shutdown hooks (even if server exits abnormally)
             for hook in self._shutdown_hooks:
