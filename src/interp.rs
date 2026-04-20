@@ -36,11 +36,13 @@ struct WorkerState {
 /// second pool with STALE channels from the first pool → permanent
 /// deadlock on recv. Use `RwLock<Vec>` instead: read lock on the hot
 /// path (~5 ns uncontended), write lock only at pool init.
-static WORKER_STATES: std::sync::RwLock<Vec<Arc<WorkerState>>> =
-    std::sync::RwLock::new(Vec::new());
+static WORKER_STATES: std::sync::RwLock<Vec<Arc<WorkerState>>> = std::sync::RwLock::new(Vec::new());
 
 fn get_worker_state(worker_id: usize) -> Option<Arc<WorkerState>> {
-    WORKER_STATES.read().ok().and_then(|v| v.get(worker_id).cloned())
+    WORKER_STATES
+        .read()
+        .ok()
+        .and_then(|v| v.get(worker_id).cloned())
 }
 
 // ---------------------------------------------------------------------------
@@ -125,7 +127,9 @@ unsafe extern "C" fn pyre_recv_cfunc(
                 req.client_ip.len() as isize,
             );
 
-            let raw_items = [id_obj, idx_obj, method_obj, path_obj, query_obj, body_obj, ip_obj];
+            let raw_items = [
+                id_obj, idx_obj, method_obj, path_obj, query_obj, body_obj, ip_obj,
+            ];
             if raw_items.iter().any(|p| p.is_null()) {
                 for p in &raw_items {
                     if !p.is_null() {
@@ -451,8 +455,12 @@ impl Drop for PyObjRef {
                         let p = (*t).tp_name;
                         if !p.is_null() {
                             std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
-                        } else { "?".into() }
-                    } else { "?".into() };
+                        } else {
+                            "?".into()
+                        }
+                    } else {
+                        "?".into()
+                    };
                     let thread_name = std::thread::current()
                         .name()
                         .map(|s| s.to_string())
@@ -1002,15 +1010,13 @@ def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n   
                 -1 => {
                     ffi::PyErr_Clear();
                     // Fall through to duck-type check.
-                    let has_status =
-                        ffi::PyObject_HasAttrString(ptr, c"status_code".as_ptr()) == 1;
+                    let has_status = ffi::PyObject_HasAttrString(ptr, c"status_code".as_ptr()) == 1;
                     let has_body = ffi::PyObject_HasAttrString(ptr, c"body".as_ptr()) == 1;
                     has_status && has_body
                 }
                 _ => {
                     // 0 (not an instance) — try duck-typing.
-                    let has_status =
-                        ffi::PyObject_HasAttrString(ptr, c"status_code".as_ptr()) == 1;
+                    let has_status = ffi::PyObject_HasAttrString(ptr, c"status_code".as_ptr()) == 1;
                     let has_body = ffi::PyObject_HasAttrString(ptr, c"body".as_ptr()) == 1;
                     has_status && has_body
                 }
@@ -1247,10 +1253,9 @@ def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n   
                     let mut val: *mut ffi::PyObject = std::ptr::null_mut();
                     while ffi::PyDict_Next(a.as_ptr(), &mut pos, &mut key, &mut val) != 0 {
                         // PyDict_Next returns borrowed refs — INCREF to own them.
-                        if let (Some(k), Some(v)) = (
-                            PyObjRef::from_borrowed(key),
-                            PyObjRef::from_borrowed(val),
-                        ) {
+                        if let (Some(k), Some(v)) =
+                            (PyObjRef::from_borrowed(key), PyObjRef::from_borrowed(val))
+                        {
                             snapshot.push((k, v));
                         }
                     }
@@ -2152,7 +2157,10 @@ mod tests {
         let got0 = get_worker_state(0).expect("install #2 slot 0 missing");
         let got1 = get_worker_state(1).expect("install #2 slot 1 missing");
         let got2 = get_worker_state(2).expect("install #2 slot 2 missing");
-        assert!(Arc::ptr_eq(&got0, &s0_second), "slot 0 still points at pool #1 — OnceLock-style silent failure regression");
+        assert!(
+            Arc::ptr_eq(&got0, &s0_second),
+            "slot 0 still points at pool #1 — OnceLock-style silent failure regression"
+        );
         assert!(Arc::ptr_eq(&got1, &s1_second));
         assert!(Arc::ptr_eq(&got2, &s2_second));
         assert!(!Arc::ptr_eq(&got0, &s0_first));

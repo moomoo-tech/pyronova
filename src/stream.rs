@@ -67,11 +67,11 @@ impl PyreStream {
         })?;
         match tx.try_send(Ok(Bytes::from(data.to_string()))) {
             Ok(()) => Ok(()),
-            Err(mpsc::error::TrySendError::Full(_)) => Err(
-                pyo3::exceptions::PyBlockingIOError::new_err(
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                Err(pyo3::exceptions::PyBlockingIOError::new_err(
                     "stream buffer full (client is slow); retry after a brief pause",
-                ),
-            ),
+                ))
+            }
             Err(mpsc::error::TrySendError::Closed(_)) => Err(
                 pyo3::exceptions::PyConnectionError::new_err("client disconnected"),
             ),

@@ -117,14 +117,17 @@ impl JsonContext {
 
     fn maybe_check_signals(&mut self, py: Python<'_>) -> Result<(), PyJsonError> {
         self.element_count += 1;
-        if self.element_count % SIGNAL_CHECK_INTERVAL == 0 {
+        if self.element_count.is_multiple_of(SIGNAL_CHECK_INTERVAL) {
             py.check_signals()
                 .map_err(|_| self.err(ErrorReason::Interrupted))?;
         }
         Ok(())
     }
 
-    fn serialize(&mut self, obj: &Bound<'_, pyo3::PyAny>) -> Result<serde_json::Value, PyJsonError> {
+    fn serialize(
+        &mut self,
+        obj: &Bound<'_, pyo3::PyAny>,
+    ) -> Result<serde_json::Value, PyJsonError> {
         if self.path.len() > MAX_DEPTH {
             return Err(self.err(ErrorReason::MaxDepthExceeded(self.path.len())));
         }
@@ -140,7 +143,10 @@ impl JsonContext {
         result
     }
 
-    fn parse_node(&mut self, obj: &Bound<'_, pyo3::PyAny>) -> Result<serde_json::Value, PyJsonError> {
+    fn parse_node(
+        &mut self,
+        obj: &Bound<'_, pyo3::PyAny>,
+    ) -> Result<serde_json::Value, PyJsonError> {
         if obj.is_none() {
             return Ok(serde_json::Value::Null);
         }
@@ -285,7 +291,9 @@ impl JsonContext {
         for (idx, item_result) in iter.enumerate() {
             self.maybe_check_signals(py)?;
             let item = item_result.map_err(|_| {
-                self.err(ErrorReason::UnsupportedType("iterator yielded an error".into()))
+                self.err(ErrorReason::UnsupportedType(
+                    "iterator yielded an error".into(),
+                ))
             })?;
             self.path.push(PathSegment::Index(idx));
             arr.push(self.serialize(&item)?);

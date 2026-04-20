@@ -127,7 +127,10 @@ pub fn spawn_rss_sampler() {
 /// code pages segfaults.
 pub fn stop_rss_sampler() {
     RSS_SAMPLER_RUNNING.store(false, Ordering::Release);
-    let handle = RSS_SAMPLER_HANDLE.lock().ok().and_then(|mut slot| slot.take());
+    let handle = RSS_SAMPLER_HANDLE
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take());
     if let Some(h) = handle {
         let _ = h.join();
     }

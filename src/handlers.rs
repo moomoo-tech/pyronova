@@ -170,10 +170,7 @@ fn apply_cors(resp: &mut Response<BoxBody>, cors: Option<&crate::router::CorsCon
         headers.insert("access-control-allow-headers", v);
     }
     if cfg.allow_credentials {
-        headers.insert(
-            "access-control-allow-credentials",
-            "true".parse().unwrap(),
-        );
+        headers.insert("access-control-allow-credentials", "true".parse().unwrap());
     }
     if let Some(expose) = cfg.expose_headers.as_ref() {
         if let Ok(v) = expose.parse() {
@@ -445,8 +442,8 @@ fn call_handler_with_hooks(
 fn build_stream_response(info: StreamInfo) -> Response<BoxBody> {
     use tokio_stream::StreamExt;
 
-    let stream = tokio_stream::wrappers::ReceiverStream::new(info.rx)
-        .map(|result| result.map(Frame::data));
+    let stream =
+        tokio_stream::wrappers::ReceiverStream::new(info.rx).map(|result| result.map(Frame::data));
 
     let body = StreamBody::new(stream);
     let boxed: BoxBody = BoxBody::new(body.map_err(|_| unreachable!()));

@@ -528,7 +528,7 @@ impl PyreApp {
                 // shutdown hostage forever.
                 conn_tracker.close();
                 const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-                if let Err(_) = tokio::time::timeout(DRAIN_TIMEOUT, conn_tracker.wait()).await {
+                if tokio::time::timeout(DRAIN_TIMEOUT, conn_tracker.wait()).await.is_err() {
                     tracing::warn!(
                         target: "pyre::server",
                         "{} in-flight connections did not drain within {:?} — exiting anyway",
@@ -731,7 +731,7 @@ impl PyreApp {
                 shutdown_token.cancel();
                 conn_tracker.close();
                 const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-                if let Err(_) = tokio::time::timeout(DRAIN_TIMEOUT, conn_tracker.wait()).await {
+                if tokio::time::timeout(DRAIN_TIMEOUT, conn_tracker.wait()).await.is_err() {
                     tracing::warn!(
                         target: "pyre::server",
                         "{} in-flight connections did not drain within {:?} — exiting anyway",

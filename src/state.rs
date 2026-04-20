@@ -105,7 +105,10 @@ impl SharedState {
     /// bytes (e.g. a JSON blob someone stored with the same key) is a
     /// trap that can corrupt application state irrecoverably.
     fn incr(&self, key: String, amount: i64) -> PyResult<i64> {
-        let mut entry = self.inner.entry(key.clone()).or_insert_with(|| Bytes::from("0"));
+        let mut entry = self
+            .inner
+            .entry(key.clone())
+            .or_insert_with(|| Bytes::from("0"));
         let raw = std::str::from_utf8(entry.value()).map_err(|_| {
             pyo3::exceptions::PyTypeError::new_err(format!(
                 "incr({key:?}): existing value is not valid UTF-8"
@@ -117,9 +120,7 @@ impl SharedState {
             ))
         })?;
         let new_val = current.checked_add(amount).ok_or_else(|| {
-            pyo3::exceptions::PyOverflowError::new_err(format!(
-                "incr({key:?}): i64 overflow"
-            ))
+            pyo3::exceptions::PyOverflowError::new_err(format!("incr({key:?}): i64 overflow"))
         })?;
         *entry = Bytes::from(new_val.to_string());
         Ok(new_val)

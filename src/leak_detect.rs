@@ -116,8 +116,7 @@ pub unsafe fn record_drop(ptr: *mut ffi::PyObject) {
     };
 
     let rc_label = rc_label(rc);
-    metrics::counter!("pyre_drop_rc", "type" => type_name, "rc" => rc_label)
-        .increment(1);
+    metrics::counter!("pyre_drop_rc", "type" => type_name, "rc" => rc_label).increment(1);
 }
 
 /// Print a snapshot of the `pyre_drop_rc` counters to stderr. Called
@@ -187,9 +186,7 @@ fn intern(s: &str) -> &'static str {
 /// precompute 0..=8 and a catch-all. 99% of samples land in the small
 /// range in practice.
 fn rc_label(rc: ffi::Py_ssize_t) -> &'static str {
-    const PRECOMPUTED: &[&str] = &[
-        "0", "1", "2", "3", "4", "5", "6", "7", "8",
-    ];
+    const PRECOMPUTED: &[&str] = &["0", "1", "2", "3", "4", "5", "6", "7", "8"];
     if (0..PRECOMPUTED.len() as ffi::Py_ssize_t).contains(&rc) {
         PRECOMPUTED[rc as usize]
     } else {

@@ -112,17 +112,17 @@ impl PyreWebSocket {
     fn try_send_outgoing(&self, msg: WsMsg) -> PyResult<()> {
         use tokio::sync::mpsc::error::TrySendError;
         let guard = self.outgoing_tx.lock().unwrap();
-        let tx = guard.as_ref().ok_or_else(|| {
-            pyo3::exceptions::PyConnectionError::new_err("WebSocket closed")
-        })?;
+        let tx = guard
+            .as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyConnectionError::new_err("WebSocket closed"))?;
         match tx.try_send(msg) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => Err(pyo3::exceptions::PyBlockingIOError::new_err(
                 "WebSocket send buffer full (client is slow); retry after a brief pause",
             )),
-            Err(TrySendError::Closed(_)) => Err(
-                pyo3::exceptions::PyConnectionError::new_err("WebSocket closed"),
-            ),
+            Err(TrySendError::Closed(_)) => Err(pyo3::exceptions::PyConnectionError::new_err(
+                "WebSocket closed",
+            )),
         }
     }
 }

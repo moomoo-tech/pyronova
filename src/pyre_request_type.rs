@@ -65,14 +65,24 @@ unsafe fn record_slot_rc(ordinal: usize, ptr: *mut ffi::PyObject) {
 #[cfg(feature = "leak_detect")]
 pub fn slot_rc_report() -> String {
     let slots = [
-        "method", "path", "params", "query", "body_bytes", "headers", "client_ip",
+        "method",
+        "path",
+        "params",
+        "query",
+        "body_bytes",
+        "headers",
+        "client_ip",
     ];
     let mut s = String::from("slot rc@dealloc histogram:\n");
     for (i, name) in slots.iter().enumerate() {
         s.push_str(&format!("  {:10}", name));
         for b in 0..8 {
             let n = SLOT_RC[i][b].load(Ordering::Relaxed);
-            let label = if b == 7 { "7+".to_string() } else { b.to_string() };
+            let label = if b == 7 {
+                "7+".to_string()
+            } else {
+                b.to_string()
+            };
             s.push_str(&format!(" rc{}:{}", label, n));
         }
         s.push('\n');
@@ -411,4 +421,3 @@ pub(crate) unsafe fn alloc_and_init(
     (*inner).client_ip = client_ip;
     Ok(obj)
 }
-

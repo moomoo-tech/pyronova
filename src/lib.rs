@@ -28,7 +28,10 @@ fn leak_detect_dump() {
 
 #[pyo3::pyfunction]
 fn workrequest_counts() -> (u64, u64) {
-    (interp::WorkRequest::created_count(), interp::WorkRequest::dropped_count())
+    (
+        interp::WorkRequest::created_count(),
+        interp::WorkRequest::dropped_count(),
+    )
 }
 
 #[cfg(feature = "leak_detect")]

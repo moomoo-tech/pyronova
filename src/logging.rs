@@ -56,7 +56,10 @@ pub fn init_logger(level: String, access_log: bool, format: String) -> PyResult<
     let nb_writer = LOGGER
         .get_or_init(|| {
             let (w, guard) = tracing_appender::non_blocking(std::io::stderr());
-            LoggerState { nb_writer: w, _guard: guard }
+            LoggerState {
+                nb_writer: w,
+                _guard: guard,
+            }
         })
         .nb_writer
         .clone();
