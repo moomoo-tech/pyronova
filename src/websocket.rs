@@ -301,16 +301,18 @@ where
             // Client → Python (via incoming_tx)
             msg = ws_source.next() => {
                 match msg {
-                    Some(Ok(Message::Text(text))) => {
-                        if incoming_tx.send(WsMsg::Text(text.to_string())).is_err() {
-                            break;
-                        }
+                    Some(Ok(Message::Text(text)))
+                        if incoming_tx.send(WsMsg::Text(text.to_string())).is_err() =>
+                    {
+                        break;
                     }
-                    Some(Ok(Message::Binary(data))) => {
-                        if incoming_tx.send(WsMsg::Binary(data.to_vec())).is_err() {
-                            break;
-                        }
+                    Some(Ok(Message::Text(_))) => {}
+                    Some(Ok(Message::Binary(data)))
+                        if incoming_tx.send(WsMsg::Binary(data.to_vec())).is_err() =>
+                    {
+                        break;
                     }
+                    Some(Ok(Message::Binary(_))) => {}
                     Some(Ok(Message::Close(_))) | None => {
                         break;
                     }

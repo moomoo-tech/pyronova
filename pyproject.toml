@@ -35,3 +35,11 @@ test = [
 features = ["pyo3/extension-module"]
 python-source = "python"
 module-name = "pyreframework.engine"
+
+[tool.pytest.ini_options]
+# Put the project root on sys.path so tests that do
+# `from tests.conftest import feature_server_factory` resolve whether
+# pytest is invoked as `pytest tests/` or `python -m pytest tests/`.
+# `python -m` prepends cwd automatically; bare `pytest` does not, and
+# the test_*_e2e files depend on the tests package being importable.
+pythonpath = ["."]
