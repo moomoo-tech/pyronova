@@ -22,6 +22,9 @@ pub(crate) struct RouteTable {
     pub(crate) handler_names: Vec<String>,
     pub(crate) requires_gil: Vec<bool>,
     pub(crate) is_async: Vec<bool>,
+    /// Per-route streaming flag. When true, the accept loop skips the
+    /// body collect and attaches a `PyreBodyStream` to the request.
+    pub(crate) is_stream: Vec<bool>,
     pub(crate) routers: HashMap<String, Router<usize>>,
     pub(crate) ws_handlers: HashMap<String, Py<PyAny>>,
     pub(crate) before_hooks: Vec<Py<PyAny>>,
@@ -42,6 +45,7 @@ impl RouteTable {
             handler_names: Vec::new(),
             requires_gil: Vec::new(),
             is_async: Vec::new(),
+            is_stream: Vec::new(),
             routers: HashMap::new(),
             ws_handlers: HashMap::new(),
             before_hooks: Vec::new(),
@@ -56,6 +60,7 @@ impl RouteTable {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn insert(
         &mut self,
         method: &str,
@@ -64,12 +69,14 @@ impl RouteTable {
         handler_name: String,
         gil: bool,
         is_async: bool,
+        is_stream: bool,
     ) -> Result<(), String> {
         let idx = self.handlers.len();
         self.handlers.push(handler);
         self.handler_names.push(handler_name);
         self.requires_gil.push(gil);
         self.is_async.push(is_async);
+        self.is_stream.push(is_stream);
         let router = self.routers.entry(method.to_uppercase()).or_default();
         router.insert(path, idx).map_err(|e| e.to_string())?;
         Ok(())

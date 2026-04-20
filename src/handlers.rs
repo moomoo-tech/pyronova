@@ -183,6 +183,58 @@ pub(crate) fn full_body(resp: Response<Full<Bytes>>) -> Response<BoxBody> {
     resp.map(|b| b.map_err(|_| unreachable!()).boxed())
 }
 
+/// Feeder task for `stream=True` routes. Reads one hyper body frame at a
+/// time and pushes each data chunk into the `PyreBodyStream`'s mpsc channel.
+/// Enforces `max_size` as a running total (defense against malicious
+/// unbounded uploads) and per-frame read timeout (Slowloris defense, same
+/// 30 s budget as the buffered path).
+async fn stream_body_feeder(
+    body: Incoming,
+    tx: std::sync::mpsc::Sender<crate::body_stream::ChunkMsg>,
+    max_size: usize,
+) {
+    use crate::body_stream::ChunkMsg;
+    use hyper::body::Body;
+    let mut body = body;
+    let mut total: usize = 0;
+    loop {
+        let frame_res = match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            std::future::poll_fn(|cx| std::pin::Pin::new(&mut body).poll_frame(cx)),
+        )
+        .await
+        {
+            Ok(Some(Ok(f))) => f,
+            Ok(Some(Err(e))) => {
+                let _ = tx.send(ChunkMsg::Err(format!("body read: {e}")));
+                return;
+            }
+            Ok(None) => {
+                let _ = tx.send(ChunkMsg::Eof);
+                return;
+            }
+            Err(_) => {
+                let _ = tx.send(ChunkMsg::Err("body read timeout (30s)".into()));
+                return;
+            }
+        };
+        if let Ok(chunk) = frame_res.into_data() {
+            total = total.saturating_add(chunk.len());
+            if total > max_size {
+                let _ = tx.send(ChunkMsg::Err(format!(
+                    "body exceeds max_body_size ({max_size} bytes)"
+                )));
+                return;
+            }
+            if tx.send(ChunkMsg::Data(chunk)).is_err() {
+                // Handler dropped the stream — no one to receive further chunks.
+                return;
+            }
+        }
+        // Trailer / metadata frames are ignored for body streaming.
+    }
+}
+
 pub(crate) async fn handle_request(
     req: Request<Incoming>,
     routes: FrozenRoutes,
@@ -203,23 +255,10 @@ pub(crate) async fn handle_request(
         .unwrap_or("")
         .to_string();
 
-    use http_body_util::Limited;
-    let limited = Limited::new(req.into_body(), max_body_size());
-    // Timeout body read to defend against Slowloris attacks
-    let body_bytes =
-        match tokio::time::timeout(std::time::Duration::from_secs(30), limited.collect()).await {
-            Ok(Ok(c)) => c.to_bytes(),
-            Ok(Err(_)) => {
-                let mut r = full_body(payload_too_large_response());
-                apply_cors(&mut r, routes.cors_config.as_ref());
-                return Ok(r);
-            }
-            Err(_) => {
-                let mut r = full_body(crate::response::gateway_timeout_response());
-                apply_cors(&mut r, routes.cors_config.as_ref());
-                return Ok(r);
-            }
-        };
+    // Take ownership of the body before the route lookup — we may either
+    // collect it synchronously (buffered path) or spawn a feeder task
+    // (streaming path) based on the matched route's `stream` flag.
+    let body_obj = req.into_body();
 
     let lookup = routes.lookup(&method, &path);
     let has_fallback = routes.fallback_handler.is_some();
@@ -236,6 +275,39 @@ pub(crate) async fn handle_request(
         None => return Ok(full_body(not_found_response())),
     };
 
+    let is_stream_route =
+        handler_idx != usize::MAX && routes.is_stream.get(handler_idx).copied().unwrap_or(false);
+
+    let (body_bytes, body_stream_rx) = if is_stream_route {
+        // Streaming path: spawn a feeder that pushes body frames into a
+        // channel. The handler takes the receiver out via `req.stream`
+        // on first access.
+        let (tx, rx) = std::sync::mpsc::channel::<crate::body_stream::ChunkMsg>();
+        let cap = max_body_size();
+        tokio::spawn(stream_body_feeder(body_obj, tx, cap));
+        (Bytes::new(), Arc::new(std::sync::Mutex::new(Some(rx))))
+    } else {
+        // Buffered path (default): collect the whole body with size + time limits.
+        use http_body_util::Limited;
+        let limited = Limited::new(body_obj, max_body_size());
+        let bytes =
+            match tokio::time::timeout(std::time::Duration::from_secs(30), limited.collect()).await
+            {
+                Ok(Ok(c)) => c.to_bytes(),
+                Ok(Err(_)) => {
+                    let mut r = full_body(payload_too_large_response());
+                    apply_cors(&mut r, routes.cors_config.as_ref());
+                    return Ok(r);
+                }
+                Err(_) => {
+                    let mut r = full_body(crate::response::gateway_timeout_response());
+                    apply_cors(&mut r, routes.cors_config.as_ref());
+                    return Ok(r);
+                }
+            };
+        (bytes, Arc::new(std::sync::Mutex::new(None)))
+    };
+
     let method_log = Arc::clone(&method);
     let path_log = Arc::clone(&path);
     let sky_req = PyreRequest {
@@ -247,6 +319,7 @@ pub(crate) async fn handle_request(
         headers_cache: std::sync::OnceLock::new(),
         client_ip_addr,
         body_bytes,
+        body_stream_rx,
     };
 
     // spawn_blocking: prevent GIL acquisition from starving Tokio workers
@@ -537,6 +610,11 @@ pub(crate) async fn handle_request_subinterp(
     if is_gil_route {
         let method_log = Arc::clone(&method);
         let path_log = Arc::clone(&path);
+        // v1 streaming limitation: sub-interpreter hybrid mode always buffers
+        // the body before dispatching to the GIL route. A proper streaming
+        // path in sub-interp mode needs per-route flag propagation into the
+        // accept loop before the body collect — deferred to v2. Use
+        // `mode="default"` for streaming-sensitive workloads today.
         let sky_req = PyreRequest {
             method,
             path,
@@ -546,6 +624,7 @@ pub(crate) async fn handle_request_subinterp(
             headers_cache: std::sync::OnceLock::new(),
             client_ip_addr,
             body_bytes,
+            body_stream_rx: Arc::new(std::sync::Mutex::new(None)),
         };
 
         let routes_ref = Arc::clone(&routes);

@@ -224,19 +224,33 @@ impl PyreApp {
     #[pyo3(signature = (path, handler, gil=false))]
     fn get(&mut self, path: &str, handler: Py<PyAny>, gil: bool, py: Python<'_>) -> PyResult<()> {
         let name = handler.getattr(py, "__name__")?.extract::<String>(py)?;
-        self.add_route("GET", path, handler, name, gil, py)
+        self.add_route("GET", path, handler, name, gil, false, py)
     }
 
-    #[pyo3(signature = (path, handler, gil=false))]
-    fn post(&mut self, path: &str, handler: Py<PyAny>, gil: bool, py: Python<'_>) -> PyResult<()> {
+    #[pyo3(signature = (path, handler, gil=false, stream=false))]
+    fn post(
+        &mut self,
+        path: &str,
+        handler: Py<PyAny>,
+        gil: bool,
+        stream: bool,
+        py: Python<'_>,
+    ) -> PyResult<()> {
         let name = handler.getattr(py, "__name__")?.extract::<String>(py)?;
-        self.add_route("POST", path, handler, name, gil, py)
+        self.add_route("POST", path, handler, name, gil, stream, py)
     }
 
-    #[pyo3(signature = (path, handler, gil=false))]
-    fn put(&mut self, path: &str, handler: Py<PyAny>, gil: bool, py: Python<'_>) -> PyResult<()> {
+    #[pyo3(signature = (path, handler, gil=false, stream=false))]
+    fn put(
+        &mut self,
+        path: &str,
+        handler: Py<PyAny>,
+        gil: bool,
+        stream: bool,
+        py: Python<'_>,
+    ) -> PyResult<()> {
         let name = handler.getattr(py, "__name__")?.extract::<String>(py)?;
-        self.add_route("PUT", path, handler, name, gil, py)
+        self.add_route("PUT", path, handler, name, gil, stream, py)
     }
 
     #[pyo3(signature = (path, handler, gil=false))]
@@ -248,20 +262,21 @@ impl PyreApp {
         py: Python<'_>,
     ) -> PyResult<()> {
         let name = handler.getattr(py, "__name__")?.extract::<String>(py)?;
-        self.add_route("DELETE", path, handler, name, gil, py)
+        self.add_route("DELETE", path, handler, name, gil, false, py)
     }
 
-    #[pyo3(signature = (method, path, handler, gil=false))]
+    #[pyo3(signature = (method, path, handler, gil=false, stream=false))]
     fn route(
         &mut self,
         method: &str,
         path: &str,
         handler: Py<PyAny>,
         gil: bool,
+        stream: bool,
         py: Python<'_>,
     ) -> PyResult<()> {
         let name = handler.getattr(py, "__name__")?.extract::<String>(py)?;
-        self.add_route(method, path, handler, name, gil, py)
+        self.add_route(method, path, handler, name, gil, stream, py)
     }
 
     fn before_request(&mut self, handler: Py<PyAny>, py: Python<'_>) -> PyResult<()> {
@@ -370,6 +385,7 @@ impl PyreApp {
                 handler_names: table.handler_names.clone(),
                 requires_gil: table.requires_gil.clone(),
                 is_async: table.is_async.clone(),
+                is_stream: table.is_stream.clone(),
                 routers: table.routers.clone(),
                 ws_handlers: table
                     .ws_handlers
@@ -420,6 +436,7 @@ impl PyreApp {
 }
 
 impl PyreApp {
+    #[allow(clippy::too_many_arguments)]
     fn add_route(
         &mut self,
         method: &str,
@@ -427,6 +444,7 @@ impl PyreApp {
         handler: Py<PyAny>,
         handler_name: String,
         gil: bool,
+        stream: bool,
         py: Python<'_>,
     ) -> PyResult<()> {
         // Auto-detect if handler is async def (also check __call__ for class-based views)
@@ -445,9 +463,23 @@ impl PyreApp {
                 })
                 .unwrap_or(false);
 
+        // Streaming constraints (v1): GIL-only, sync handlers only.
+        // Sub-interp streaming needs a C-FFI bridge; async streaming needs
+        // awaitable support. Both deferred to v2.
+        if stream && !gil {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "stream=True requires gil=True (v1 limitation)",
+            ));
+        }
+        if stream && is_async {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "stream=True is not yet supported on async def handlers (v1 limitation)",
+            ));
+        }
+
         let mut routes = self.routes.write();
         routes
-            .insert(method, path, handler, handler_name, gil, is_async)
+            .insert(method, path, handler, handler_name, gil, is_async, stream)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("route error: {e}")))?;
         Ok(())
     }

@@ -217,17 +217,17 @@ class Pyre:
     def get(self, path: str, handler: Callable | None = None, *, gil: bool = False, model: type | None = None):
         return self._route("GET", path, handler, gil=gil, model=model)
 
-    def post(self, path: str, handler: Callable | None = None, *, gil: bool = False, model: type | None = None):
-        return self._route("POST", path, handler, gil=gil, model=model)
+    def post(self, path: str, handler: Callable | None = None, *, gil: bool = False, model: type | None = None, stream: bool = False):
+        return self._route("POST", path, handler, gil=gil, model=model, stream=stream)
 
-    def put(self, path: str, handler: Callable | None = None, *, gil: bool = False, model: type | None = None):
-        return self._route("PUT", path, handler, gil=gil, model=model)
+    def put(self, path: str, handler: Callable | None = None, *, gil: bool = False, model: type | None = None, stream: bool = False):
+        return self._route("PUT", path, handler, gil=gil, model=model, stream=stream)
 
     def delete(self, path: str, handler: Callable | None = None, *, gil: bool = False, model: type | None = None):
         return self._route("DELETE", path, handler, gil=gil, model=model)
 
-    def patch(self, path: str, handler: Callable | None = None, *, gil: bool = False, model: type | None = None):
-        return self._route("PATCH", path, handler, gil=gil, model=model)
+    def patch(self, path: str, handler: Callable | None = None, *, gil: bool = False, model: type | None = None, stream: bool = False):
+        return self._route("PATCH", path, handler, gil=gil, model=model, stream=stream)
 
     def options(self, path: str, handler: Callable | None = None, *, gil: bool = False, model: type | None = None):
         return self._route("OPTIONS", path, handler, gil=gil, model=model)
@@ -235,10 +235,10 @@ class Pyre:
     def head(self, path: str, handler: Callable | None = None, *, gil: bool = False, model: type | None = None):
         return self._route("HEAD", path, handler, gil=gil, model=model)
 
-    def route(self, method: str, path: str, handler: Callable | None = None, *, gil: bool = False, model: type | None = None):
-        return self._route(method.upper(), path, handler, gil=gil, model=model)
+    def route(self, method: str, path: str, handler: Callable | None = None, *, gil: bool = False, model: type | None = None, stream: bool = False):
+        return self._route(method.upper(), path, handler, gil=gil, model=model, stream=stream)
 
-    def _route(self, method: str, path: str, handler: Callable | None, *, gil: bool = False, model: type | None = None):
+    def _route(self, method: str, path: str, handler: Callable | None, *, gil: bool = False, model: type | None = None, stream: bool = False):
         def _wrap_with_model(fn: Callable, mdl: type) -> Callable:
             """Wrap handler to auto-validate request body with Pydantic model."""
             import inspect
@@ -280,12 +280,12 @@ class Pyre:
         if handler is not None:
             if model is not None:
                 handler = _wrap_with_model(handler, model)
-            self._engine.route(method, path, handler, gil)
+            self._engine.route(method, path, handler, gil, stream)
             return handler
 
         def decorator(fn: Callable) -> Callable:
             wrapped = _wrap_with_model(fn, model) if model is not None else fn
-            self._engine.route(method, path, wrapped, gil)
+            self._engine.route(method, path, wrapped, gil, stream)
             return fn  # Return original for type hints
 
         return decorator

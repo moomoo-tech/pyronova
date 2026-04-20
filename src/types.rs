@@ -37,12 +37,26 @@ pub(crate) struct PyreRequest {
     pub(crate) client_ip_addr: IpAddr,
     /// Stored as Bytes (ref-counted, zero-copy from hyper).
     pub(crate) body_bytes: Bytes,
+    /// For streaming routes (`stream=True`), this holds the feeder channel's
+    /// receiver end, shared across all clones of this request so the
+    /// handler (which receives a clone from `call_handler_with_hooks`) can
+    /// take ownership. The first `.stream` access wins; subsequent calls
+    /// return None. Stored as raw receiver (not `Py<PyreBodyStream>`) to
+    /// keep `drop_in_place::<PyreRequest>` free of `_Py_Dealloc` — that
+    /// would break `cargo test` linking for the pure-Rust unit tests.
+    pub(crate) body_stream_rx:
+        Arc<std::sync::Mutex<Option<std::sync::mpsc::Receiver<crate::body_stream::ChunkMsg>>>>,
 }
 
 /// Manual Clone: OnceLock doesn't impl Clone, so we reset the cache on clone.
 /// Cloned requests lazily recompute headers if accessed.
 impl Clone for PyreRequest {
     fn clone(&self) -> Self {
+        // body_stream_rx is a one-shot channel — it can't be cloned. Clones
+        // get an empty stream slot; the original passed to the handler keeps
+        // the receiver. Since the framework only streams on the main request
+        // copy (before_request / after_request hooks run under the same
+        // sky_req before the clone cascade), this is the correct semantics.
         Self {
             method: self.method.clone(),
             path: self.path.clone(),
@@ -52,6 +66,7 @@ impl Clone for PyreRequest {
             headers_cache: OnceLock::new(),
             client_ip_addr: self.client_ip_addr,
             body_bytes: self.body_bytes.clone(),
+            body_stream_rx: Arc::clone(&self.body_stream_rx),
         }
     }
 }
@@ -109,6 +124,34 @@ impl PyreRequest {
     #[getter]
     fn body(&self) -> &[u8] {
         &self.body_bytes
+    }
+
+    /// Streaming body iterator. Only populated on routes registered with
+    /// `stream=True`; returns `None` otherwise so code that doesn't opt-in
+    /// never sees a stream object.
+    ///
+    /// **Consumed on first access.** The receiver is taken out of the
+    /// shared slot, so a second call to `req.stream` in the same request
+    /// lifecycle returns `None`. Before/after hooks that clone the request
+    /// and read `.stream` will steal chunks from the handler — that's the
+    /// caller's bug, not ours.
+    ///
+    /// Usage in a `@app.post(..., gil=True, stream=True)` handler:
+    ///
+    /// ```python
+    /// for chunk in req.stream:
+    ///     process(chunk)
+    /// ```
+    #[getter]
+    fn stream(&self, py: Python<'_>) -> PyResult<Option<Py<crate::body_stream::PyreBodyStream>>> {
+        let rx = { self.body_stream_rx.lock().unwrap().take() };
+        match rx {
+            Some(rx) => Ok(Some(Py::new(
+                py,
+                crate::body_stream::PyreBodyStream::new(rx),
+            )?)),
+            None => Ok(None),
+        }
     }
 
     /// Zero-copy: validates UTF-8 on the Bytes slice, creates Python str directly.
@@ -249,6 +292,7 @@ mod tests {
             headers_cache: std::sync::OnceLock::new(),
             client_ip_addr: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
             body_bytes: Bytes::new(),
+            body_stream_rx: Arc::new(std::sync::Mutex::new(None)),
         };
         let qp = req.query_params();
         assert_eq!(qp["q"], "hello world");
@@ -267,6 +311,7 @@ mod tests {
             headers_cache: std::sync::OnceLock::new(),
             client_ip_addr: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
             body_bytes: Bytes::new(),
+            body_stream_rx: Arc::new(std::sync::Mutex::new(None)),
         };
         assert!(req.query_params().is_empty());
     }
@@ -282,6 +327,7 @@ mod tests {
             headers_cache: std::sync::OnceLock::new(),
             client_ip_addr: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
             body_bytes: Bytes::new(),
+            body_stream_rx: Arc::new(std::sync::Mutex::new(None)),
         };
         assert_eq!(req.query_params()["name"], "中文");
     }
