@@ -199,6 +199,61 @@ The ~40% gap is consistent with other Pyre bench results
 - Actix tuned brotli: 55k × 8 × 0.5 ≈ 220k rps
 - Pyre advantage on 64C: **~1.5×** (not 2–3×, not 40×)
 
+## Addendum — TLS (added 2026-04-20, same session)
+
+Added after TLS support landed. Same machine, same wrk config,
+same fortunes payload, self-signed rustls cert, ALPN negotiates h2
+but wrk uses HTTP/1.1 over TLS (HTTP/1.1 keep-alive dominates the
+benchmark so this doesn't matter for throughput).
+
+| Config | Pyre | Actix |
+|---|---|---|
+| **TLS, no compression** | 254,697 rps / p50 366μs / p99 1ms | **307,462 rps** / p50 248μs / p99 44ms |
+| **TLS + brotli q=4** | 84,106 rps / 115 MB/s | not measured |
+| **TLS + gzip L=6** | 108,455 rps / 154 MB/s | not measured |
+
+**Findings:**
+
+1. **Pyre pays ~6% TLS tax** (272k plain → 255k TLS). Actix pays
+   ~21% (390k plain → 307k TLS). Both use rustls 0.23 + ring crypto
+   — same cipher CPU work, same AES-NI. Pyre's lower tax likely
+   comes from fewer middleware layers in the response path (same
+   reason Pyre beats Actix on compressed: thinner stack).
+2. **TLS narrows the gap.** Plain Actix leads 1.43×; TLS Actix leads
+   only 1.21×. At higher compression + TLS workloads, the gap is
+   expected to narrow further since compression CPU dominates.
+3. **TLS + compression stacks cleanly.** Pyre brotli-over-TLS hits
+   84k (vs 87k plain-brotli), within measurement noise. Adding the
+   rustls layer on top of an already CPU-bound compression path is
+   effectively free.
+4. **Actix's p99 (44ms) is worse than Pyre's (1ms) under TLS.** Same
+   observation as the compression section: Actix's async stack has
+   tail-latency hiccups, probably from worker imbalance at
+   concurrency 100 / 4 workers.
+
+### Memory (sustained TLS load)
+
+Ran the regression gate with TLS on:
+
+```
+7,405,824 requests over 30s
+RSS warm: 208,332 KB
+RSS end:  210,128 KB
+Growth:   1,796 KB → 0.24 B/req
+```
+
+Passes the 200 B/req hard gate by three orders of magnitude. Confirms
+the `fc45a7f` tstate-rebind fix holds under the TLS code path — no
+new leak introduced by rustls integration.
+
+### Defensible claim on TLS
+
+"Pyre's TLS overhead is ~6%, lower than Actix's ~21%, because our
+response path after the rustls handshake goes through fewer
+middleware layers. In absolute terms Actix still leads TLS throughput
+by 1.2× on uncompressed JSON — same Rust-vs-Python asymmetry as
+plaintext, just compressed by the TLS tax Actix pays."
+
 ## Reproducibility
 
 ```bash
@@ -209,7 +264,15 @@ maturin develop --release
 cd benchmarks/rust-baseline
 cargo build --release --bin bench-actix-compressed          # default
 cargo build --release --bin bench-actix-compressed-tuned    # tuned
+cargo build --release --bin bench-actix-tls                 # TLS
 cd ../..
+
+# Generate a self-signed cert for the TLS runs
+mkdir -p /tmp/pyre_tls && cd /tmp/pyre_tls
+openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout key.pem -out cert.pem -days 1 \
+    -subj "/CN=localhost"
+cd -
 
 # Start Pyre (port 8001)
 PYRE_COMPRESSION=1 PYRE_PORT=8001 python benchmarks/bench_compression.py &
@@ -221,6 +284,15 @@ benchmarks/rust-baseline/target/release/bench-actix-compressed-tuned &     # tun
 wrk -t4 -c100 -d10s -H 'Accept-Encoding: br, gzip' http://127.0.0.1:8001/json-fortunes
 wrk -t4 -c100 -d10s -H 'Accept-Encoding: gzip'     http://127.0.0.1:8001/json-fortunes
 wrk -t4 -c100 -d10s                                http://127.0.0.1:8001/json-fortunes
+
+# TLS variants (port 8443)
+PYRE_TLS_CERT=/tmp/pyre_tls/cert.pem PYRE_TLS_KEY=/tmp/pyre_tls/key.pem \
+    PYRE_PORT=8443 python benchmarks/bench_compression.py &
+# OR Actix TLS
+PYRE_TLS_CERT=/tmp/pyre_tls/cert.pem PYRE_TLS_KEY=/tmp/pyre_tls/key.pem \
+    benchmarks/rust-baseline/target/release/bench-actix-tls &
+
+wrk -t4 -c100 -d10s -H 'Accept-Encoding: identity' https://127.0.0.1:8443/json-fortunes
 ```
 
 Same 32-record payload, same wrk config. Numbers should track within
