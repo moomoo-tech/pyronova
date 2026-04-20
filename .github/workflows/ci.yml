@@ -80,12 +80,8 @@ jobs:
       - name: Integration — full pytest suite (GIL + sub-interp)
         run: |
           source .venv/bin/activate
-          # Skip non-pytest harnesses: test_ws_binary_client.py is a
-          # client script driven by test_ws_binary_server.py; multifile_app
-          # is a multi-file Pyre fixture consumed by other tests.
-          pytest tests/ -q \
-            --ignore=tests/test_ws_binary_client.py \
-            --ignore=tests/multifile_app
+          # E2E drivers live under tests/e2e/ (not collected by pytest).
+          pytest tests/ -q --ignore=tests/e2e
 
   # ── Rust lint (blocking) ──────────────────────────────────────────
   rust-lint:

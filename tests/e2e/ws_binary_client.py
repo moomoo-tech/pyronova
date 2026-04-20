@@ -1,8 +1,18 @@
-"""WebSocket binary test client."""
+"""WebSocket binary test client.
+
+Standalone driver — NOT a pytest test despite the `test_*` filename.
+Paired with `test_ws_binary_server.py`: run the server, then
+`python test_ws_binary_client.py` in another shell. Renamed the
+async function to `main` and added a `__main__` guard so pytest can
+safely import this module during collection (previous module-level
+`asyncio.run(test())` spawned live WebSocket traffic on import).
+"""
 import asyncio
+
 import websockets
 
-async def test():
+
+async def main() -> None:
     async with websockets.connect("ws://127.0.0.1:8000/echo") as ws:
         # Text message
         await ws.send("hello")
@@ -20,4 +30,6 @@ async def test():
         await ws.close()
         print("  ✅ closed")
 
-asyncio.run(test())
+
+if __name__ == "__main__":
+    asyncio.run(main())

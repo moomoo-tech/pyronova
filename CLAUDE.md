@@ -117,8 +117,7 @@ tests/
   test_logging.py           # 4 logging tests
   test_env_var_worker.py    # Env var + decorator tests
   test_async_bridge.py      # Phase 7.2 async bridge
-  test_ws_binary_*.py       # WebSocket tests
-  multifile_app/            # Multi-file project tests
+  e2e/                      # Manual-run drivers (ws_binary_server/client)
 benchmarks/
   run_comparison.sh   # Pyre vs FastAPI head-to-head
   run_bench.sh        # Pyre vs Robyn
