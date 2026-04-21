@@ -282,6 +282,14 @@ pub(crate) async fn handle_request(
     routes: FrozenRoutes,
     client_ip_addr: std::net::IpAddr,
 ) -> Result<Response<BoxBody>, hyper::Error> {
+    // gRPC short-circuit: if the request looks like gRPC
+    // (`application/grpc*` content-type on POST), it goes to the
+    // hand-rolled unary dispatcher instead of the normal routing
+    // pipeline. gRPC responses need HTTP/2 trailers with `grpc-status`,
+    // which the regular Response<Full<Bytes>> path doesn't model.
+    if crate::grpc::is_grpc_request(&req) {
+        return crate::grpc::handle_grpc(req).await;
+    }
     crate::monitor::TOTAL_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let start = std::time::Instant::now();
     let method: Arc<str> = Arc::from(req.method().as_str());
@@ -648,6 +656,10 @@ pub(crate) async fn handle_request_subinterp(
     routes: FrozenRoutes,
     client_ip_addr: std::net::IpAddr,
 ) -> Result<Response<BoxBody>, hyper::Error> {
+    // gRPC short-circuit — see handle_request above.
+    if crate::grpc::is_grpc_request(&req) {
+        return crate::grpc::handle_grpc(req).await;
+    }
     crate::monitor::TOTAL_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let start = std::time::Instant::now();
     let method: Arc<str> = Arc::from(req.method().as_str());

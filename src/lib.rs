@@ -5,6 +5,7 @@ mod app;
 mod body_stream;
 mod compression;
 mod db;
+mod grpc;
 mod handlers;
 mod interp;
 mod json;
