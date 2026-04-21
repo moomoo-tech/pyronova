@@ -775,26 +775,45 @@ pub(crate) struct WorkRequest {
     pub response_tx: tokio::sync::oneshot::Sender<Result<SubInterpResponse, String>>,
 }
 
-// Diagnostic: count WorkRequest creates vs worker-completes. We cannot
-// use a Drop impl here because `response_tx` gets moved out inside the
-// worker loop (`req.response_tx.send(...)`) — a Drop on WorkRequest
-// would forbid destructuring. Instead we bump the counter at each
-// site where a request finishes its turn through the pipeline.
+// Diagnostic: count WorkRequest creates vs worker-completes. Gated
+// behind `leak_detect` because hitting two shared atomics on every
+// request is an NUMA disaster on many-core boxes — a single shared
+// AtomicU64 pings its cache line across every CCD on a Threadripper /
+// EPYC on every `fetch_add`, silently capping throughput regardless of
+// how many workers we spawn. The public `workrequest_counts()`
+// Python export keeps its shape: returns (0, 0) when the feature is
+// off, real values when diagnostics are compiled in.
+#[cfg(feature = "leak_detect")]
 static WR_CREATED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(feature = "leak_detect")]
 static WR_COMPLETED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl WorkRequest {
+    #[inline(always)]
     pub fn inc_created() {
+        #[cfg(feature = "leak_detect")]
         WR_CREATED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
+    #[inline(always)]
     pub fn inc_completed() {
+        #[cfg(feature = "leak_detect")]
         WR_COMPLETED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     pub fn created_count() -> u64 {
-        WR_CREATED.load(std::sync::atomic::Ordering::Relaxed)
+        #[cfg(feature = "leak_detect")]
+        {
+            return WR_CREATED.load(std::sync::atomic::Ordering::Relaxed);
+        }
+        #[cfg(not(feature = "leak_detect"))]
+        0
     }
     pub fn dropped_count() -> u64 {
-        WR_COMPLETED.load(std::sync::atomic::Ordering::Relaxed)
+        #[cfg(feature = "leak_detect")]
+        {
+            return WR_COMPLETED.load(std::sync::atomic::Ordering::Relaxed);
+        }
+        #[cfg(not(feature = "leak_detect"))]
+        0
     }
 }
 

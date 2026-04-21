@@ -29,6 +29,13 @@ def _cpu_count() -> int:
 def main() -> int:
     total = _cpu_count()
     per_proc = max(total // 2, 1)
+    # IO threads handle accept + hyper socket read/write. Each IO thread
+    # can drive many thousands of rps, so running one per CPU is severe
+    # over-subscription once workers (Python sub-interps) also want a
+    # core. Rule of thumb on Threadripper/EPYC: 1 IO thread per 4
+    # physical cores, floored at 4, capped at 16 — keeps the accept loops
+    # on a single CCD and leaves the other CCDs for Python.
+    io_per_proc = min(max(per_proc // 4, 4), 16)
 
     base_port = int(os.environ.get("PORT", "8080"))
     tls_cert = os.environ.get("TLS_CERT", "/certs/server.crt")
@@ -37,7 +44,7 @@ def main() -> int:
 
     env_common = dict(os.environ)
     env_common["PYRONOVA_WORKERS"] = str(per_proc)
-    env_common["PYRONOVA_IO_WORKERS"] = str(per_proc)
+    env_common["PYRONOVA_IO_WORKERS"] = str(io_per_proc)
     # Metrics / access log off; benchmarks care about throughput, not logs.
     env_common.pop("PYRONOVA_LOG", None)
     env_common.pop("PYRONOVA_METRICS", None)
