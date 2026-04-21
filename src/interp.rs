@@ -542,6 +542,27 @@ impl Drop for PyObjRef {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
             unsafe {
+                // Fast path: skip Py_DECREF on immortal singletons
+                // (Py_None, Py_True, Py_False, small ints, interned
+                // unicode with saturated refcount).
+                //
+                // CPython 3.12+ sets their refcount to a sentinel
+                // >= (1 << 30), and Py_DECREF on such values is a no-op
+                // inside the CPython macros. Skipping here means we can
+                // also skip the tstate check — these objects are shared
+                // across every sub-interpreter and never actually
+                // deallocated, so dropping them on a thread without an
+                // attached tstate is 100% safe.
+                //
+                // Before this skip, Arena's 4096-conn JSON profile
+                // flooded the log with "no attached tstate" warnings
+                // on every Py_None drop from the tokio response path
+                // (main thread had no sub-interp tstate attached after
+                // `py.detach()`). That log volume alone dragged p99
+                // from <5ms into >60ms and stomped throughput by ~3×.
+                if ffi::Py_REFCNT(self.ptr) >= (1_isize << 30) {
+                    return;
+                }
                 // SAFETY: Py_DECREF requires this thread to have a current
                 // tstate (the sub-interp-aware way to say "holds the GIL").
                 //

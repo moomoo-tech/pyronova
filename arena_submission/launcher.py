@@ -41,6 +41,13 @@ def main() -> int:
     # Metrics / access log off; benchmarks care about throughput, not logs.
     env_common.pop("PYRONOVA_LOG", None)
     env_common.pop("PYRONOVA_METRICS", None)
+    # Hard-silence the tracing subscriber. Default level is ERROR, which
+    # still writes any `tracing::error!` call to stderr — under 4096-conn
+    # load a single recurring error log (see the PyObjRef leak bug) drags
+    # throughput by ~3× from log-pipe contention alone. OFF makes every
+    # tracing macro a zero-cost no-op, matching what Actix / Helidon /
+    # ASP.NET ship in their benchmark images.
+    env_common["PYRONOVA_LOG_LEVEL"] = "OFF"
 
     procs = []
 

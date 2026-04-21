@@ -1,12 +1,41 @@
 use bytes::Bytes;
+use dashmap::DashMap;
 use http_body_util::Full;
 use hyper::{Response, StatusCode};
+use std::path::PathBuf;
+use std::sync::OnceLock;
 use tokio::io::AsyncReadExt;
 
 /// Maximum size (in bytes) of a static file served out of memory.
 /// Files larger than this are refused with 413 to avoid OOM on pathological
 /// requests (multi-GB files in the static dir, etc.).
 const MAX_STATIC_FILE_BYTES: u64 = 16 * 1024 * 1024; // 16 MiB
+
+/// Soft cap on the in-memory static-file cache. Once the cache grows past
+/// this many cumulative bytes, new files are served without being cached
+/// (old entries stay — we don't evict). At 128 MiB the cap comfortably
+/// holds any reasonable static site without letting a misconfigured root
+/// blow the RSS budget.
+const STATIC_CACHE_MAX_BYTES: u64 = 128 * 1024 * 1024;
+
+/// Cache entry: the file bytes + precomputed content-type. We cache on
+/// the canonical path so symlinks inside the static root resolve to the
+/// same entry as their target.
+#[derive(Clone)]
+struct CachedFile {
+    bytes: Bytes,
+    content_type: &'static str,
+}
+
+fn cache() -> &'static DashMap<PathBuf, CachedFile> {
+    static C: OnceLock<DashMap<PathBuf, CachedFile>> = OnceLock::new();
+    C.get_or_init(DashMap::new)
+}
+
+fn cache_bytes() -> &'static std::sync::atomic::AtomicU64 {
+    static B: OnceLock<std::sync::atomic::AtomicU64> = OnceLock::new();
+    B.get_or_init(|| std::sync::atomic::AtomicU64::new(0))
+}
 
 /// Return the MIME type for a file extension. The extension is expected in
 /// lowercase without a leading dot (e.g. `mime_from_ext("png")`). Falls
@@ -75,6 +104,15 @@ pub(crate) async fn try_static_file(
             return Some(forbidden_response());
         }
 
+        // Cache hit: reuse the shared Bytes (Arc clone, zero-copy).
+        // Benchmark-grade static profiles hit the same 20 files from
+        // thousands of connections per second; without this cache the
+        // server re-reads every file into a fresh Vec<u8> per request,
+        // driving RSS from ~50 MiB to ~8 GiB at 6800 connections.
+        if let Some(entry) = cache().get(&file_canonical) {
+            return Some(ok_response_bytes(entry.content_type, entry.bytes.clone()));
+        }
+
         // Open once and derive metadata from the fd. Previously we called
         // tokio::fs::metadata(path) and then tokio::fs::read(path) in two
         // separate syscalls — a TOCTOU race where an attacker swapping
@@ -138,7 +176,24 @@ pub(crate) async fn try_static_file(
             .and_then(|e| e.to_str())
             .unwrap_or("");
         let ct = mime_from_ext(ext);
-        return Some(ok_response(ct, contents));
+
+        // Populate the cache for future requests. Skip once the cumulative
+        // cache size has crossed the soft cap — serving uncached is still
+        // correct, just pays the re-read cost. We don't evict: static files
+        // rarely rotate, and an LRU would need locking around every hit.
+        let bytes = Bytes::from(contents);
+        let prev = cache_bytes().load(std::sync::atomic::Ordering::Relaxed);
+        if prev + bytes.len() as u64 <= STATIC_CACHE_MAX_BYTES {
+            cache_bytes().fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            cache().insert(
+                file_canonical.clone(),
+                CachedFile {
+                    bytes: bytes.clone(),
+                    content_type: ct,
+                },
+            );
+        }
+        return Some(ok_response_bytes(ct, bytes));
     }
     None
 }
@@ -169,13 +224,13 @@ fn payload_too_large_response() -> Response<Full<Bytes>> {
         .expect("static payload-too-large response: constant components are valid")
 }
 
-fn ok_response(content_type: &'static str, contents: Vec<u8>) -> Response<Full<Bytes>> {
+fn ok_response_bytes(content_type: &'static str, bytes: Bytes) -> Response<Full<Bytes>> {
     Response::builder()
         .status(StatusCode::OK)
         .header("content-type", content_type)
         .header("server", crate::response::SERVER_HEADER)
         .header("x-content-type-options", "nosniff")
-        .body(Full::new(Bytes::from(contents)))
+        .body(Full::new(bytes))
         .expect("static ok response: constant headers + validated ct are valid")
 }
 
