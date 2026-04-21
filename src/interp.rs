@@ -894,7 +894,11 @@ impl SubInterpreterWorker {
         let emit_log_func =
             ffi::PyCFunction_NewEx(emit_log_def, std::ptr::null_mut(), std::ptr::null_mut());
         if !emit_log_func.is_null() {
-            ffi::PyDict_SetItemString(globals.as_ptr(), c"_pyronova_emit_log".as_ptr(), emit_log_func);
+            ffi::PyDict_SetItemString(
+                globals.as_ptr(),
+                c"_pyronova_emit_log".as_ptr(),
+                emit_log_func,
+            );
             ffi::Py_DECREF(emit_log_func);
         }
 
@@ -2273,7 +2277,11 @@ fn worker_thread_loop_async(
         let emit_log_func =
             ffi::PyCFunction_NewEx(emit_log_def, std::ptr::null_mut(), std::ptr::null_mut());
         if !emit_log_func.is_null() {
-            ffi::PyDict_SetItemString(worker.globals, c"_pyronova_emit_log".as_ptr(), emit_log_func);
+            ffi::PyDict_SetItemString(
+                worker.globals,
+                c"_pyronova_emit_log".as_ptr(),
+                emit_log_func,
+            );
             ffi::Py_DECREF(emit_log_func);
         }
 

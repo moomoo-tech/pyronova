@@ -412,7 +412,9 @@ pub(crate) async fn handle_request(
         call_handler_with_hooks(routes_ref, handler_idx, sky_req)
     })
     .await
-    .unwrap_or_else(|_| HandlerResult::PyronovaResponse(Err("handler thread panicked".to_string())));
+    .unwrap_or_else(|_| {
+        HandlerResult::PyronovaResponse(Err("handler thread panicked".to_string()))
+    });
 
     let mut resp = match handler_result {
         HandlerResult::PyronovaResponse(mut result) => {
@@ -496,11 +498,16 @@ fn call_handler_with_hooks(
                     };
                     let bound = result.bind(py);
                     if !bound.is_none() {
-                        return HandlerResult::PyronovaResponse(extract_response_data(py, bound.clone()));
+                        return HandlerResult::PyronovaResponse(extract_response_data(
+                            py,
+                            bound.clone(),
+                        ));
                     }
                 }
                 Err(e) => {
-                    return HandlerResult::PyronovaResponse(Err(format!("before_request hook error: {e}")))
+                    return HandlerResult::PyronovaResponse(Err(format!(
+                        "before_request hook error: {e}"
+                    )))
                 }
             }
         }
@@ -526,7 +533,7 @@ fn call_handler_with_hooks(
                         Some(r) => r,
                         None => {
                             return HandlerResult::PyronovaResponse(Err(
-                                "PyronovaStream already consumed".to_string()
+                                "PyronovaStream already consumed".to_string(),
                             ))
                         }
                     };
@@ -838,7 +845,9 @@ pub(crate) async fn handle_request_subinterp(
             call_handler_with_hooks(routes_ref, handler_idx, sky_req)
         })
         .await
-        .unwrap_or_else(|_| HandlerResult::PyronovaResponse(Err("handler thread panicked".to_string())));
+        .unwrap_or_else(|_| {
+            HandlerResult::PyronovaResponse(Err("handler thread panicked".to_string()))
+        });
 
         let mut resp = match handler_result {
             HandlerResult::PyronovaResponse(mut result) => {

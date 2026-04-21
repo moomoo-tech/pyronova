@@ -330,7 +330,11 @@ mod tests {
     fn tempdir() -> TempDir {
         let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let mut base = std::env::temp_dir();
-        base.push(format!("pyronova-static-fs-test-{}-{}", std::process::id(), n));
+        base.push(format!(
+            "pyronova-static-fs-test-{}-{}",
+            std::process::id(),
+            n
+        ));
         let _ = std::fs::remove_dir_all(&base); // clean stale from prior crashed run
         std::fs::create_dir_all(&base).unwrap();
         TempDir { path: base }

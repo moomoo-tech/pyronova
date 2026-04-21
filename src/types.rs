@@ -150,7 +150,10 @@ impl PyronovaRequest {
     ///     process(chunk)
     /// ```
     #[getter]
-    fn stream(&self, py: Python<'_>) -> PyResult<Option<Py<crate::body_stream::PyronovaBodyStream>>> {
+    fn stream(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<Option<Py<crate::body_stream::PyronovaBodyStream>>> {
         let rx = { self.body_stream_rx.lock().unwrap().take() };
         match rx {
             Some(rx) => Ok(Some(Py::new(
