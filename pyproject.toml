@@ -29,6 +29,7 @@ test = [
     "pydantic",
     "numpy",
     "msgpack",
+    "pydantic-settings>=2",
 ]
 
 [project.scripts]

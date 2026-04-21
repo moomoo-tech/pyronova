@@ -512,6 +512,36 @@ class Pyre:
         return decorator
 
     # ------------------------------------------------------------------
+    # Observability — X-Request-ID + /metrics
+    # ------------------------------------------------------------------
+
+    def enable_request_id(self, header: str = "X-Request-ID") -> None:
+        """Guarantee every response carries an ``X-Request-ID`` header.
+
+        If the client sent one, it's echoed back verbatim (so trace IDs
+        propagated from an upstream proxy survive). If not, a fresh UUID
+        v4 hex is minted. Idempotent.
+        """
+        if getattr(self, "_request_id_enabled", False):
+            return
+        from pyreframework.observability import install_request_id
+        install_request_id(self, header)
+        self._request_id_enabled = True
+
+    def enable_metrics(self, path: str = "/metrics") -> None:
+        """Expose Prometheus metrics at ``path`` (default ``/metrics``).
+
+        Registers a ``GET /metrics`` route plus before/after-request hooks
+        that maintain counters in ``app.state``. The scrape endpoint does
+        not count itself. Idempotent.
+        """
+        if getattr(self, "_metrics_enabled", False):
+            return
+        from pyreframework.observability import install_metrics
+        install_metrics(self, path)
+        self._metrics_enabled = True
+
+    # ------------------------------------------------------------------
     # Health probes — /livez + /readyz
     # ------------------------------------------------------------------
 
