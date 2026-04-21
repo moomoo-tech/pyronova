@@ -310,14 +310,29 @@ pub(crate) async fn handle_request(
 
     if lookup.is_none() && (method.as_ref() == "GET" || method.as_ref() == "HEAD") {
         if let Some(resp) = try_static_file(&path, &routes.static_dirs).await {
-            return Ok(full_body(resp));
+            // Static file hit: apply CORS before returning. Previously
+            // this early-return path skipped `apply_cors` at the function
+            // bottom, so CORS-configured apps served static assets
+            // without the allow-origin / allow-methods headers.
+            let mut r = full_body(resp);
+            apply_cors(&mut r, routes.cors_config.as_ref());
+            return Ok(r);
         }
     }
 
     let (handler_idx, params) = match lookup {
         Some(v) => v,
         None if has_fallback => (usize::MAX, Vec::new()),
-        None => return Ok(full_body(not_found_response())),
+        // 404 must still carry CORS headers — browsers running an
+        // OPTIONS preflight against an unknown path would otherwise
+        // block the real cross-origin request with a generic "CORS
+        // policy" error that's painful to debug. The normal dispatch
+        // path applies CORS at function-exit; we replicate that here.
+        None => {
+            let mut r = full_body(not_found_response());
+            apply_cors(&mut r, routes.cors_config.as_ref());
+            return Ok(r);
+        }
     };
 
     let is_stream_route =
@@ -640,14 +655,22 @@ pub(crate) async fn handle_request_subinterp(
 
     if lookup.is_none() && (method.as_ref() == "GET" || method.as_ref() == "HEAD") {
         if let Some(resp) = try_static_file(&path, &pool.static_dirs).await {
-            return Ok(full_body(resp));
+            // Same CORS fix as handle_request — don't short-circuit
+            // past apply_cors on static-file hits.
+            let mut r = full_body(resp);
+            apply_cors(&mut r, pool.cors_config.as_ref());
+            return Ok(r);
         }
     }
 
     let (handler_idx, params) = match lookup {
         Some(v) => v,
         None if has_fallback => (usize::MAX, Vec::new()),
-        None => return Ok(full_body(not_found_response())),
+        None => {
+            let mut r = full_body(not_found_response());
+            apply_cors(&mut r, pool.cors_config.as_ref());
+            return Ok(r);
+        }
     };
 
     // ── Hybrid dispatch: GIL routes use main interpreter ──
@@ -661,6 +684,23 @@ pub(crate) async fn handle_request_subinterp(
     let is_stream_route = is_gil_route
         && handler_idx != usize::MAX
         && routes.is_stream.get(handler_idx).copied().unwrap_or(false);
+
+    // Invariant guard: registering a stream=True route requires gil=True
+    // (`add_route` enforces this). If somehow that constraint is bypassed
+    // — a future refactor, a router hack — we'd spawn the feeder task and
+    // then send the resulting empty `body_bytes` to a sub-interpreter
+    // worker, silently discarding the client's upload. Fail closed with
+    // a 500 instead of the black hole.
+    let is_stream_on_subinterp = handler_idx != usize::MAX
+        && !is_gil_route
+        && routes.is_stream.get(handler_idx).copied().unwrap_or(false);
+    if is_stream_on_subinterp {
+        let mut r = full_body(error_response(
+            "stream=True routes must be registered with gil=True (framework invariant violated)",
+        ));
+        apply_cors(&mut r, pool.cors_config.as_ref());
+        return Ok(r);
+    }
 
     // Decide body handling: stream-capable GIL routes bypass the collect
     // (proper streaming), everyone else collects up front.

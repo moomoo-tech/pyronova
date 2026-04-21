@@ -208,6 +208,45 @@ def test_async_execute(pool):
     asyncio.run(run())
 
 
+def test_unknown_column_types_do_not_explode(pool):
+    """Regression for the DB-decode-fallback bug: the previous `_ =>`
+    fallback in `column_to_py` forced `<String as Decode>::decode` on the
+    raw binary value, which failed for every non-text Postgres type
+    (UUID, TIMESTAMP, INET, interval, …). Queries touching those types
+    blew up with PyRuntimeError.
+
+    Post-fix the fallback returns raw bytes on a decode failure, so the
+    query succeeds and the caller can handle the bytes as they see fit.
+    """
+    # UUID — 16-byte binary payload, no String decoder.
+    row = pool.fetch_one("SELECT gen_random_uuid() AS u")
+    assert row is not None
+    # Either a bytes fallback (UUID wire format) or a text rep from
+    # sqlx's text-format path — both are acceptable, neither is an
+    # exception.
+    assert isinstance(row["u"], (bytes, str))
+
+    # TIMESTAMP — 8 bytes micros since 2000-01-01.
+    row = pool.fetch_one("SELECT now() AS t")
+    assert row is not None
+    assert isinstance(row["t"], (bytes, str))
+
+    # INET — variable-length.
+    row = pool.fetch_one("SELECT '10.0.0.1'::inet AS ip")
+    assert row is not None
+    assert isinstance(row["ip"], (bytes, str))
+
+
+def test_uuid_text_cast_roundtrip(pool):
+    """Workaround documented in the fallback comment: cast to text
+    server-side for a clean string column in the Python dict."""
+    row = pool.fetch_one("SELECT gen_random_uuid()::text AS u")
+    assert isinstance(row["u"], str)
+    # Rough UUID shape check: 8-4-4-4-12 hex + dashes.
+    assert len(row["u"]) == 36
+    assert row["u"].count("-") == 4
+
+
 def test_async_concurrent_queries(pool):
     """Concurrent async queries interleave on the pool's tokio runtime."""
     import asyncio

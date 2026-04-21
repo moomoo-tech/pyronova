@@ -175,12 +175,36 @@ fn column_to_py(py: Python<'_>, value: PgValueRef<'_>) -> PyResult<Py<PyAny>> {
                 .map(|b| b.unbind())
                 .map_err(|e| PyRuntimeError::new_err(format!("pythonize json: {e}")))
         }
-        // Unknown — return the column's textual representation so the
-        // caller at least gets something readable instead of a silent error.
+        // Unknown type — graceful fallback.
+        //
+        // Previously this branch forced `<String as Decode>::decode(value)`,
+        // which assumes the column value is a UTF-8 byte sequence. That's
+        // fine for text-format types but **fails hard** on binary-format
+        // types like UUID (16-byte big-endian), TIMESTAMP (8-byte micros),
+        // INET (tagged variable), etc. — sqlx returns a decode error and
+        // the whole query bubbles up as PyRuntimeError, so any table with
+        // a UUID column became un-queryable via Pyre.
+        //
+        // New fallback: try String first (covers extensions like citext,
+        // ltree, tsvector that really are text), and on failure return the
+        // raw column bytes as `bytes`. Callers who need the typed value
+        // should either `SELECT col::text` to coerce server-side or wait
+        // for explicit UUID/TIMESTAMP decoders (tracked as follow-up;
+        // needs the uuid + chrono sqlx features).
         _ => {
-            let s = <String as sqlx::Decode<sqlx::Postgres>>::decode(value)
-                .map_err(|e| PyRuntimeError::new_err(format!("decode {type_name} as text: {e}")))?;
-            Ok(PyString::new(py, &s).into_any().unbind())
+            // Snapshot the raw wire bytes first — `sqlx::Decode::decode`
+            // consumes the PgValueRef by value, so we can't retry on
+            // fallback. Grab the bytes before any decode attempt.
+            let raw = value.as_bytes().ok().map(|b| b.to_vec());
+            match <String as sqlx::Decode<sqlx::Postgres>>::decode(value) {
+                Ok(s) => Ok(PyString::new(py, &s).into_any().unbind()),
+                Err(_) => match raw {
+                    Some(b) => Ok(PyBytes::new(py, &b).into_any().unbind()),
+                    None => Err(PyRuntimeError::new_err(format!(
+                        "unsupported column type {type_name}: no raw bytes available"
+                    ))),
+                },
+            }
         }
     }
 }

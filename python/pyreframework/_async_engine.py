@@ -39,7 +39,7 @@ async def _process_request(req_id, handler_idx, method, path, params, query, bod
         handler_name = HANDLER_NAMES[int(handler_idx)]
         handler = globals().get(handler_name)
         if handler is None:
-            _pyre_send(WORKER_ID, req_id, 500, "text/plain", b"handler not found")
+            _pyre_send(WORKER_ID, _pyre_pool_id, req_id, 500, "text/plain", b"handler not found")
             return
 
         req = _PyreRequest(method, path, params, query, body_bytes, headers, client_ip)
@@ -58,6 +58,7 @@ async def _process_request(req_id, handler_idx, method, path, params, query, bod
             )
             _pyre_send(
                 WORKER_ID,
+                _pyre_pool_id,
                 req_id,
                 res.status_code,
                 res.content_type or "text/plain",
@@ -66,13 +67,14 @@ async def _process_request(req_id, handler_idx, method, path, params, query, bod
         elif isinstance(res, dict):
             _pyre_send(
                 WORKER_ID,
+                _pyre_pool_id,
                 req_id,
                 200,
                 "application/json",
                 _json_dumps_bytes(res),
             )
         elif isinstance(res, bytes):
-            _pyre_send(WORKER_ID, req_id, 200, "application/octet-stream", res)
+            _pyre_send(WORKER_ID, _pyre_pool_id, req_id, 200, "application/octet-stream", res)
         else:
             body = str(res).encode("utf-8")
             ct = (
@@ -80,9 +82,9 @@ async def _process_request(req_id, handler_idx, method, path, params, query, bod
                 if body.startswith(b"{") or body.startswith(b"[")
                 else "text/plain"
             )
-            _pyre_send(WORKER_ID, req_id, 200, ct, body)
+            _pyre_send(WORKER_ID, _pyre_pool_id, req_id, 200, ct, body)
     except asyncio.TimeoutError:
-        _pyre_send(WORKER_ID, req_id, 504, "text/plain", b"handler timeout")
+        _pyre_send(WORKER_ID, _pyre_pool_id, req_id, 504, "text/plain", b"handler timeout")
     except asyncio.CancelledError:
         # Propagated cancellation — client disconnected or Rust future dropped.
         # Don't send response; the oneshot receiver is already gone.
@@ -93,12 +95,15 @@ async def _process_request(req_id, handler_idx, method, path, params, query, bod
         # was masking real handler bugs — the exception type + traceback
         # are what operators need at 3am, not the reply envelope.
         _log.exception("async handler req_id=%s path=%s raised", req_id, path)
-        _pyre_send(WORKER_ID, req_id, 500, "text/plain", str(e).encode("utf-8"))
+        _pyre_send(WORKER_ID, _pyre_pool_id, req_id, 500, "text/plain", str(e).encode("utf-8"))
 
 
 def _fetcher_thread(loop):
     while True:
-        req_data = _pyre_recv(WORKER_ID)
+        # The pool_id argument is the zombie-worker guard (see
+        # src/interp.rs :: pyre_recv_cfunc). A stale worker whose pool
+        # has been replaced will see None here and exit the loop.
+        req_data = _pyre_recv(WORKER_ID, _pyre_pool_id)
         if req_data is None:
             break
         req_id, handler_idx, method, path, params, query, body_bytes, headers, client_ip = req_data

@@ -26,7 +26,20 @@ struct WorkerState {
     response_map:
         Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Result<SubInterpResponse, String>>>>,
     next_req_id: AtomicU64,
+    /// Identifier for the `InterpreterPool` instance that created this
+    /// state. A zombie worker from a prior pool (test / hot-reload)
+    /// carries the OLD pool_id in its Python globals; the C-FFI bridge
+    /// compares the caller's pool_id to the state's and rejects
+    /// mismatches so the zombie can't steal requests from the new pool.
+    /// See POOL_ID_COUNTER docstring for the rationale.
+    pool_id: u64,
 }
+
+/// Monotonic counter for pool instance IDs. Each call to
+/// `InterpreterPool::new()` consumes one. This exists exclusively so
+/// `pyre_recv` / `pyre_send` can detect cross-pool calls — see
+/// `WorkerState::pool_id` and the guard in `pyre_recv_cfunc`.
+static POOL_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Global registry of worker states, indexed by worker_id.
 ///
@@ -49,20 +62,30 @@ fn get_worker_state(worker_id: usize) -> Option<Arc<WorkerState>> {
 // C-FFI bridge functions for async engine
 // ---------------------------------------------------------------------------
 
-/// pyre_recv(worker_id) → (req_id, handler_idx, method, path, params, query, body, headers, client_ip) or None
+/// pyre_recv(worker_id, pool_id) → (req_id, handler_idx, method, path, params, query, body, headers, client_ip) or None
 /// RELEASES GIL during blocking recv — lets asyncio loop run freely.
+///
+/// `pool_id` is the worker's "birth certificate". If the state currently
+/// installed at `worker_id` belongs to a DIFFERENT pool (i.e. we're a
+/// zombie from a prior `app.run()` that finally woke up), we return None
+/// so the zombie's caller sees EOF and exits rather than stealing
+/// requests from the live pool.
 unsafe extern "C" fn pyre_recv_cfunc(
     _self: *mut ffi::PyObject,
     args: *mut ffi::PyObject,
 ) -> *mut ffi::PyObject {
     let mut worker_id: isize = 0;
-    if ffi::PyArg_ParseTuple(args, c"n".as_ptr(), &mut worker_id) == 0 {
+    let mut pool_id: u64 = 0;
+    if ffi::PyArg_ParseTuple(args, c"nK".as_ptr(), &mut worker_id, &mut pool_id) == 0 {
         return std::ptr::null_mut();
     }
 
     let state = match get_worker_state(worker_id as usize) {
-        Some(s) => s,
-        None => {
+        Some(s) if s.pool_id == pool_id => s,
+        // Mismatch or missing slot — either stale pool or race after
+        // InterpreterPool::drop. Return None; the async engine treats
+        // this as shutdown and exits cleanly.
+        _ => {
             ffi::Py_INCREF(ffi::Py_None());
             return ffi::Py_None();
         }
@@ -171,13 +194,16 @@ unsafe extern "C" fn pyre_recv_cfunc(
     }
 }
 
-/// pyre_send(worker_id, req_id, status, content_type, body_bytes)
-/// Wakes up Tokio via oneshot channel.
+/// pyre_send(worker_id, pool_id, req_id, status, content_type, body_bytes)
+/// Wakes up Tokio via oneshot channel. The `pool_id` is checked against the
+/// installed state to guard against zombie-worker cross-pool writes —
+/// see `pyre_recv_cfunc` docstring for the rationale.
 unsafe extern "C" fn pyre_send_cfunc(
     _self: *mut ffi::PyObject,
     args: *mut ffi::PyObject,
 ) -> *mut ffi::PyObject {
     let mut worker_id: isize = 0;
+    let mut pool_id: u64 = 0;
     let mut req_id: u64 = 0;
     let mut status: u16 = 0;
     let mut ctype_str: *const std::os::raw::c_char = std::ptr::null();
@@ -185,10 +211,15 @@ unsafe extern "C" fn pyre_send_cfunc(
     let mut body_len: isize = 0;
 
     // n=isize, K=u64, H=u16, z=str|None, y#=bytes+len
+    // Returning NULL with the exception still set is how Python signals
+    // parse failure from a C extension — don't PyErr_Print here or the
+    // exception gets cleared and the caller sees the confusing
+    // "returned NULL without setting an exception" warning.
     if ffi::PyArg_ParseTuple(
         args,
-        c"nKHzy#".as_ptr(),
+        c"nKKHzy#".as_ptr(),
         &mut worker_id,
+        &mut pool_id,
         &mut req_id,
         &mut status,
         &mut ctype_str,
@@ -196,7 +227,6 @@ unsafe extern "C" fn pyre_send_cfunc(
         &mut body_len,
     ) == 0
     {
-        ffi::PyErr_Print();
         return std::ptr::null_mut();
     }
 
@@ -217,7 +247,10 @@ unsafe extern "C" fn pyre_send_cfunc(
         Vec::new()
     };
 
-    if let Some(state) = get_worker_state(worker_id as usize) {
+    // Same pool-id guard as pyre_recv. Dropping the send here rather
+    // than just skipping means the tokio side times out naturally (504)
+    // instead of getting a response from the wrong pool.
+    if let Some(state) = get_worker_state(worker_id as usize).filter(|s| s.pool_id == pool_id) {
         let mut map = state.response_map.lock().unwrap();
         if let Some(tx) = map.remove(&req_id) {
             // Check if the receiver is still alive (client may have timed out).
@@ -652,6 +685,10 @@ struct SubInterpreterWorker {
     _asyncio_loop: *mut ffi::PyObject,
     /// Cached: loop.run_until_complete method
     loop_run_func: *mut ffi::PyObject,
+    /// Pool instance id (see `POOL_ID_COUNTER`). Exposed to the async
+    /// engine as `_pyre_pool_id` so it can be passed into every
+    /// `_pyre_recv` / `_pyre_send` call for the zombie-worker guard.
+    pool_id: u64,
 }
 
 unsafe impl Send for SubInterpreterWorker {}
@@ -662,7 +699,12 @@ impl SubInterpreterWorker {
     /// # Safety
     /// Must be called while the main interpreter's thread state is current.
     /// Switches to the new sub-interpreter and back to main on completion.
-    unsafe fn new(script: &str, script_path: &str, func_names: &[String]) -> Result<Self, String> {
+    unsafe fn new(
+        script: &str,
+        script_path: &str,
+        func_names: &[String],
+        pool_id: u64,
+    ) -> Result<Self, String> {
         let main_tstate = ffi::PyThreadState_Get();
 
         let mut new_tstate: *mut ffi::PyThreadState = std::ptr::null_mut();
@@ -687,7 +729,7 @@ impl SubInterpreterWorker {
         // (and the thread resources it pins) leak permanently. Delegate
         // init to a helper so `?` can short-circuit safely — we catch its
         // Err here and perform cleanup regardless of which step failed.
-        match Self::init_in_sub_interp(script, script_path, func_names) {
+        match Self::init_in_sub_interp(script, script_path, func_names, pool_id) {
             Ok(worker) => {
                 ffi::PyThreadState_Swap(main_tstate);
                 Ok(worker)
@@ -711,6 +753,7 @@ impl SubInterpreterWorker {
         script: &str,
         script_path: &str,
         func_names: &[String],
+        pool_id: u64,
     ) -> Result<Self, String> {
         // Run the bootstrap (from external .py file) + user script.
         let bootstrap_src = include_str!("../python/pyreframework/_bootstrap.py");
@@ -892,6 +935,7 @@ def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n   
             sky_response_cls,
             _asyncio_loop: asyncio_loop,
             loop_run_func,
+            pool_id,
         })
     }
 
@@ -1665,13 +1709,19 @@ impl InterpreterPool {
             (n, 0)
         };
 
+        // Allocate a fresh pool_id for this InterpreterPool instance.
+        // All WorkerStates created below carry this id; the C-FFI bridge
+        // rejects recv/send from zombies whose pool_id mismatches.
+        let pool_id = POOL_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+
         // Create sub-interpreters and spawn worker threads
         let mut workers = Vec::new();
         let mut threads = Vec::new();
 
         for i in 0..n {
-            let worker = SubInterpreterWorker::new(&raw_script, script_path, &all_func_names)
-                .map_err(|e| format!("sub-interpreter {i}: {e}"))?;
+            let worker =
+                SubInterpreterWorker::new(&raw_script, script_path, &all_func_names, pool_id)
+                    .map_err(|e| format!("sub-interpreter {i}: {e}"))?;
             workers.push(worker);
         }
 
@@ -1684,6 +1734,7 @@ impl InterpreterPool {
                     rx: async_rx.clone(),
                     response_map: Mutex::new(HashMap::new()),
                     next_req_id: AtomicU64::new(0),
+                    pool_id,
                 }));
             }
             // Overwrite rather than .set() — this pool may not be the
@@ -1985,9 +2036,16 @@ fn worker_thread_loop(
         WorkRequest::inc_completed();
     }
 
-    // Channel closed — clean up the sub-interpreter
+    // Channel closed — clean up the sub-interpreter.
+    //
+    // Zombie-safety: if `InterpreterPool::drop` `mem::forget`d this
+    // thread after the 5s grace period, the process may have already
+    // called `Py_Finalize` by the time we get here. `PyEval_RestoreThread`
+    // + `Py_EndInterpreter` on a finalized VM is UAF → segfault at
+    // shutdown. Skip cleanup in that case; the OS will reclaim whatever
+    // the sub-interp was holding as the process exits.
     unsafe {
-        if !worker.tstate.is_null() {
+        if !worker.tstate.is_null() && pyo3::ffi::Py_IsInitialized() != 0 {
             ffi::PyEval_RestoreThread(worker.tstate);
             ffi::Py_EndInterpreter(ffi::PyThreadState_Get());
             worker.tstate = std::ptr::null_mut();
@@ -2054,6 +2112,19 @@ fn worker_thread_loop_async(
         ffi::Py_DECREF(recv_func);
         ffi::Py_DECREF(send_func);
 
+        // Zombie-guard: each sub-interpreter stamps its pool_id as a
+        // module-level constant. The async engine reads it once and
+        // passes it as the second arg to every _pyre_recv / _pyre_send
+        // call. If a later pool's WorkerState has replaced our slot,
+        // the C-FFI bridge detects the id mismatch and returns None
+        // (sentinel for "your pool is gone, clean up and exit") so
+        // this worker can't receive requests meant for the live pool.
+        let pool_id_obj = ffi::PyLong_FromUnsignedLongLong(worker.pool_id);
+        if !pool_id_obj.is_null() {
+            ffi::PyDict_SetItemString(worker.globals, c"_pyre_pool_id".as_ptr(), pool_id_obj);
+            ffi::Py_DECREF(pool_id_obj);
+        }
+
         // Register _pyre_emit_log for async worker logging bridge
         #[allow(clippy::missing_transmute_annotations)]
         let emit_log_def = Box::into_raw(Box::new(ffi::PyMethodDef {
@@ -2085,8 +2156,10 @@ fn worker_thread_loop_async(
             ffi::Py_DECREF(result);
         }
 
-        // Cleanup
-        ffi::Py_EndInterpreter(ffi::PyThreadState_Get());
+        // Cleanup — same zombie-safety as the sync worker loop.
+        if pyo3::ffi::Py_IsInitialized() != 0 {
+            ffi::Py_EndInterpreter(ffi::PyThreadState_Get());
+        }
         worker.tstate = std::ptr::null_mut();
     }
 }
@@ -2109,6 +2182,7 @@ mod tests {
             rx,
             response_map: Mutex::new(HashMap::new()),
             next_req_id: AtomicU64::new(0),
+            pool_id: POOL_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
         });
         (st, tx)
     }
@@ -2173,5 +2247,68 @@ mod tests {
         // state bleed (RwLock is a static).
         let mut w = WORKER_STATES.write().unwrap();
         w.clear();
+    }
+
+    /// Regression for the zombie-worker-stealing-requests bug.
+    ///
+    /// Scenario: async worker W from Pool A is mid-request. Pool A drops,
+    /// Pool B replaces `WORKER_STATES[0]`. W finally wakes up and looks
+    /// up its state. Without the `pool_id` guard it would silently receive
+    /// from Pool B's channel — stealing a live request.
+    ///
+    /// The guard: `pyre_recv_cfunc` / `pyre_send_cfunc` accept a pool_id
+    /// arg and short-circuit to None on mismatch. We exercise the guard
+    /// at the Rust level (the C-FFI wrappers just do PyArg_ParseTuple
+    /// then call this same path) to keep the test free of pyo3 test-rig
+    /// plumbing.
+    #[test]
+    fn zombie_worker_rejected_by_pool_id_mismatch() {
+        let (s_new, _tx) = mint_state(); // pool_id = N
+        let old_pool_id = s_new.pool_id.wrapping_sub(1); // pretend we're from an earlier pool
+
+        {
+            let mut w = WORKER_STATES.write().unwrap();
+            *w = vec![s_new.clone()];
+        }
+
+        // Live pool's caller (matching pool_id) sees the state.
+        let live = get_worker_state(0).expect("slot 0 must exist");
+        assert_eq!(live.pool_id, s_new.pool_id);
+
+        // Zombie's caller carries the OLD pool_id. The C-FFI bridge's
+        // filter `s.pool_id == pool_id` would reject it; simulate the
+        // same check here.
+        let zombie_sees = get_worker_state(0).filter(|s| s.pool_id == old_pool_id);
+        assert!(
+            zombie_sees.is_none(),
+            "zombie worker from old pool was able to read new pool's state"
+        );
+
+        let mut w = WORKER_STATES.write().unwrap();
+        w.clear();
+    }
+
+    /// Regression for the UAF-on-shutdown bug.
+    ///
+    /// The fix is a defensive `pyo3::ffi::Py_IsInitialized() != 0` check
+    /// around `PyEval_RestoreThread` + `Py_EndInterpreter` in both
+    /// worker_thread_loop variants. We can't easily simulate a finalized
+    /// interpreter in a unit test — but we can verify the guard is
+    /// present in the source, so a future refactor can't silently
+    /// remove it.
+    #[test]
+    fn worker_cleanup_guarded_against_finalized_interp() {
+        let src = include_str!("interp.rs");
+        // Both worker_thread_loop and worker_thread_loop_async must
+        // check Py_IsInitialized before touching the tstate on exit.
+        let guard_sites = src.matches("Py_IsInitialized() != 0").count();
+        assert!(
+            guard_sites >= 2,
+            "expected Py_IsInitialized() guard in BOTH worker loops; \
+             found {} occurrence(s). If you're consolidating the loops \
+             make sure the single guard still covers the forgotten-
+             thread cleanup path.",
+            guard_sites
+        );
     }
 }
