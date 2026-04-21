@@ -1,0 +1,23 @@
+{
+  "display_name": "pyre",
+  "language": "Python",
+  "type": "production",
+  "engine": "pyre",
+  "description": "Pyre — Python web framework with a Rust core (hyper + tokio + rustls + mimalloc) and PEP 684 sub-interpreter workers for true multi-core parallelism. Opt-in features: gzip/brotli compression, rustls TLS with h2/h1 ALPN, streaming body ingest, async Postgres via sqlx::PgPool. Handlers are standard Python functions routed via decorators.",
+  "repo": "https://github.com/moomoo-tech/pyre",
+  "enabled": true,
+  "tests": [
+    "baseline",
+    "pipelined",
+    "limited-conn",
+    "json",
+    "json-comp",
+    "json-tls",
+    "upload",
+    "async-db",
+    "static",
+    "baseline-h2",
+    "static-h2"
+  ],
+  "maintainers": []
+}
