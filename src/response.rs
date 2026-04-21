@@ -10,6 +10,7 @@ use pyo3::types::{PyAnyMethods, PyDict, PyList, PyString};
 
 use crate::json::py_to_json_value;
 use crate::types::{PyreResponse, ResponseData};
+use pyo3::types::PyBytes;
 
 // ---------------------------------------------------------------------------
 // Extract handler return value → ResponseData
@@ -37,6 +38,15 @@ pub(crate) fn extract_response_data(
             let json_bytes =
                 serde_json::to_vec(&val).map_err(|e| format!("json serialize error: {e}"))?;
             (Bytes::from(json_bytes), "application/json")
+        } else if let Ok(pb) = body_bound.cast::<PyBytes>() {
+            // Fast path for PyBytes: one copy (PyBytes buffer → Bytes
+            // heap) instead of PyBytes::extract which builds a
+            // transient Vec<u8> before we wrap it — same number of
+            // allocations on the surface, but skips the iteration.
+            (
+                Bytes::copy_from_slice(pb.as_bytes()),
+                "application/octet-stream",
+            )
         } else if let Ok(b) = body_bound.extract::<Vec<u8>>() {
             (Bytes::from(b), "application/octet-stream")
         } else {
@@ -99,7 +109,15 @@ pub(crate) fn extract_response_data(
         });
     }
 
-    // bytes
+    // bytes — fast path for PyBytes skips the Vec<u8> extraction step
+    if let Ok(pb) = obj.cast::<PyBytes>() {
+        return Ok(ResponseData {
+            body: Bytes::copy_from_slice(pb.as_bytes()),
+            content_type: "application/octet-stream".to_string(),
+            status: 200,
+            headers: HashMap::new(),
+        });
+    }
     if let Ok(b) = obj.extract::<Vec<u8>>() {
         return Ok(ResponseData {
             body: Bytes::from(b),

@@ -184,6 +184,45 @@ impl PyreApp {
         crate::handlers::set_max_body_size(size);
     }
 
+    /// Register a fast-path route — a response that never enters Python.
+    ///
+    /// For routes with a constant body (health checks, `/robots.txt`,
+    /// `/pipeline` probe endpoints, maintenance pages) the Python handler
+    /// dispatch is pure overhead: GIL acquisition, handler call,
+    /// serialization, all for the same bytes every time. `add_fast_response`
+    /// stores the fully-built response at registration time; the accept
+    /// loop serves it directly without any Python involvement.
+    ///
+    /// The match is exact `(method, path)` — no path params, no glob.
+    /// Path-parameterized routes still need a real handler.
+    #[pyo3(signature = (
+        method,
+        path,
+        body,
+        content_type="text/plain".to_string(),
+        status_code=200,
+        headers=None
+    ))]
+    fn add_fast_response(
+        &mut self,
+        method: &str,
+        path: &str,
+        body: Vec<u8>,
+        content_type: String,
+        status_code: u16,
+        headers: Option<std::collections::HashMap<String, String>>,
+    ) -> PyResult<()> {
+        let key = (method.to_ascii_uppercase(), path.to_string());
+        let resp = crate::router::FastResponse {
+            body: bytes::Bytes::from(body),
+            content_type,
+            status: status_code,
+            headers: headers.unwrap_or_default(),
+        };
+        self.routes.write().fast_responses.insert(key, resp);
+        Ok(())
+    }
+
     /// Configure response compression. Disabled by default; opt-in only.
     ///
     /// Args:
@@ -401,6 +440,7 @@ impl PyreApp {
                 static_dirs: table.static_dirs.clone(),
                 cors_config: self.cors_config.clone(),
                 request_logging: self.request_logging,
+                fast_responses: table.fast_responses.clone(),
             })
         };
 

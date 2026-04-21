@@ -183,6 +183,36 @@ pub(crate) fn full_body(resp: Response<Full<Bytes>>) -> Response<BoxBody> {
     resp.map(|b| b.map_err(|_| unreachable!()).boxed())
 }
 
+/// Build a hyper response from a `FastResponse` — used for the fast-path
+/// route table (`app.add_fast_response`). No Python touched; just copies
+/// the pre-built Bytes + headers into a Response<Full<Bytes>>.
+fn build_fast_response(
+    fr: &crate::router::FastResponse,
+    cors: Option<&crate::router::CorsConfig>,
+) -> Response<Full<Bytes>> {
+    let status = StatusCode::from_u16(fr.status).unwrap_or(StatusCode::OK);
+    let mut builder = Response::builder()
+        .status(status)
+        .header("content-type", &fr.content_type)
+        .header("server", crate::response::SERVER_HEADER);
+    for (k, v) in &fr.headers {
+        builder = builder.header(k.as_str(), v.as_str());
+    }
+    // Inline a subset of apply_cors so we don't allocate a BoxBody just
+    // to mutate and reboxed. The fast path is latency-sensitive.
+    if let Some(cfg) = cors {
+        if let Ok(v) = cfg.origin.parse::<hyper::header::HeaderValue>() {
+            builder = builder.header("access-control-allow-origin", v);
+        }
+        if let Ok(v) = cfg.methods.parse::<hyper::header::HeaderValue>() {
+            builder = builder.header("access-control-allow-methods", v);
+        }
+    }
+    builder
+        .body(Full::new(fr.body.clone()))
+        .unwrap_or_else(|_| error_response("invalid fast response"))
+}
+
 /// Feeder task for `stream=True` routes. Reads one hyper body frame at a
 /// time and pushes each data chunk into the `PyreBodyStream`'s mpsc channel.
 /// Enforces `max_size` as a running total (defense against malicious
@@ -246,6 +276,21 @@ pub(crate) async fn handle_request(
     let uri = req.uri().clone();
     let path: Arc<str> = Arc::from(uri.path());
     let query = uri.query().unwrap_or("").to_string();
+
+    // Fast-path: pre-built response registered via app.add_fast_response().
+    // Served entirely from Rust — no Python call, no GIL wait, no body read.
+    // Checked before headers/body because for fast routes none of that
+    // matters; we have the exact bytes + status + content-type already.
+    if let Some(fr) = routes
+        .fast_responses
+        .get(&(method.to_string(), path.to_string()))
+    {
+        return Ok(full_body(build_fast_response(
+            fr,
+            routes.cors_config.as_ref(),
+        )));
+    }
+
     // Lazy headers: store raw HeaderMap, convert only if Python accesses req.headers.
     let raw_headers = req.headers().clone();
     // Capture Accept-Encoding before raw_headers is moved into the PyreRequest.
@@ -563,6 +608,20 @@ pub(crate) async fn handle_request_subinterp(
     let uri = req.uri().clone();
     let path: Arc<str> = Arc::from(uri.path());
     let query = uri.query().unwrap_or("").to_string();
+
+    // Fast-path: pre-built response registered via app.add_fast_response().
+    // Same short-circuit as handle_request — no Python, no sub-interp
+    // dispatch, no body read.
+    if let Some(fr) = routes
+        .fast_responses
+        .get(&(method.to_string(), path.to_string()))
+    {
+        return Ok(full_body(build_fast_response(
+            fr,
+            routes.cors_config.as_ref(),
+        )));
+    }
+
     // Defer header extraction — only convert if needed (sub-interp path).
     let raw_headers = req.headers().clone();
     let accept_encoding = raw_headers

@@ -1,9 +1,23 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use matchit::Router;
 use parking_lot::RwLock;
 use pyo3::prelude::*;
+
+/// A response entirely built at registration time — no Python call,
+/// no serialization, no allocation on the request path. Served directly
+/// from the accept loop for exact-match (method, path) lookups. Use
+/// cases: `/pipeline "ok"`, `/health`, `/robots.txt`, maintenance
+/// pages, any constant-body endpoint.
+#[derive(Clone)]
+pub(crate) struct FastResponse {
+    pub(crate) body: Bytes,
+    pub(crate) content_type: String,
+    pub(crate) status: u16,
+    pub(crate) headers: HashMap<String, String>,
+}
 
 /// Full CORS configuration. When present, applied to every response —
 /// not just OPTIONS preflight — per W3C CORS spec requirements for
@@ -36,6 +50,11 @@ pub(crate) struct RouteTable {
     pub(crate) static_dirs: Vec<(String, String)>,
     pub(crate) cors_config: Option<CorsConfig>,
     pub(crate) request_logging: bool,
+    /// Exact-match (METHOD, path) → pre-built response, served from
+    /// the accept loop before any Python dispatch. HashMap because we
+    /// want O(1) lookup; the key is `(uppercase_method, path)` to match
+    /// the canonical form hyper gives us.
+    pub(crate) fast_responses: HashMap<(String, String), FastResponse>,
 }
 
 impl RouteTable {
@@ -57,6 +76,7 @@ impl RouteTable {
             static_dirs: Vec::new(),
             cors_config: None,
             request_logging: false,
+            fast_responses: HashMap::new(),
         }
     }
 

@@ -199,6 +199,45 @@ class Pyre:
         """Disable response compression. No-op if already disabled."""
         self._engine.configure_compression(False)
 
+    def add_fast_response(
+        self,
+        method: str,
+        path: str,
+        body: bytes | str,
+        *,
+        content_type: str = "text/plain",
+        status_code: int = 200,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        """Register a route that returns a pre-built response without
+        entering Python.
+
+        Use for constant-body endpoints — health checks, ``/robots.txt``,
+        ``/pipeline`` probe routes, maintenance pages. The accept loop
+        serves the exact bytes stored here on every match, skipping GIL
+        acquisition, handler dispatch, and response serialization.
+
+        Match is exact ``(method, path)`` — no path parameters, no
+        globbing. If you need those, register a normal decorator route.
+
+        Example::
+
+            app.add_fast_response("GET", "/health", b'{"ok":true}',
+                                  content_type="application/json")
+            app.add_fast_response("GET", "/robots.txt",
+                                  b"User-agent: *\\nDisallow: /\\n")
+        """
+        if isinstance(body, str):
+            body = body.encode("utf-8")
+        self._engine.add_fast_response(
+            method.upper(),
+            path,
+            body,
+            content_type=content_type,
+            status_code=status_code,
+            headers=headers,
+        )
+
     @property
     def state(self):
         """Shared state across all sub-interpreters (nanosecond latency).
