@@ -157,7 +157,7 @@ def test_unsupported_param_type_raises(pool):
 
 def test_connect_is_idempotent(pool):
     """Calling connect() again with same DSN returns a usable handle."""
-    again = PgPool.connect(PG_DSN, max_connections=1)
+    again = PgPool.connect(PG_DSN)
     # Uses the same underlying pool.
     assert again.fetch_scalar("SELECT 1") == 1
 
@@ -317,17 +317,16 @@ def test_async_concurrent_queries(pool):
     import time
 
     async def run():
+        # pg_sleep(0.1) × 4 concurrent: ~0.1s parallel, ~0.4s serial.
+        # Threshold 0.3s detects a re-serialized pool while leaving slack
+        # for noisy full-suite runs.
         start = time.perf_counter()
-        # pg_sleep(0.1) × 4 concurrent should finish in ~0.1s, not 0.4s,
-        # if the pool actually multiplexes. Uses fetch_scalar_async so
-        # each call round-trips one row.
         results = await asyncio.gather(*[
             pool.fetch_scalar_async("SELECT pg_sleep(0.1), 1")
             for _ in range(4)
         ])
         elapsed = time.perf_counter() - start
         assert len(results) == 4
-        # Allow some slack for startup; if it's > 300ms we're serializing.
         assert elapsed < 0.3, f"async queries serialized: {elapsed:.2f}s"
 
     asyncio.run(run())

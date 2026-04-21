@@ -69,7 +69,10 @@ def client():
 
 def test_register_rejects_bad_identifiers():
     app = Pyre()
-    pool = PgPool.connect(PG_DSN, max_connections=1)
+    # No max_connections here (and below): the process-wide pool binds
+    # the value from the first connect() call; pinning it to 1 starves
+    # later tests that need multiple concurrent connections.
+    pool = PgPool.connect(PG_DSN)
     with pytest.raises(ValueError, match="invalid SQL identifier"):
         register_crud(
             app, pool,
@@ -81,7 +84,7 @@ def test_register_rejects_bad_identifiers():
 
 def test_register_requires_id_in_columns():
     app = Pyre()
-    pool = PgPool.connect(PG_DSN, max_connections=1)
+    pool = PgPool.connect(PG_DSN)
     with pytest.raises(ValueError, match="must be included in columns"):
         register_crud(
             app, pool,
@@ -94,7 +97,7 @@ def test_register_requires_id_in_columns():
 
 def test_register_rejects_bad_prefix():
     app = Pyre()
-    pool = PgPool.connect(PG_DSN, max_connections=1)
+    pool = PgPool.connect(PG_DSN)
     with pytest.raises(ValueError, match="must start with"):
         register_crud(app, pool, prefix="no-slash", table="pyre_crud_items", columns=["id"])
     with pytest.raises(ValueError, match="must not end with"):
