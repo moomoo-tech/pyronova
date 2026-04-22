@@ -63,6 +63,32 @@ fn create_reuseport_listener(addr: SocketAddr) -> Result<std::net::TcpListener, 
         .bind(&addr.into())
         .map_err(|e| format!("bind error: {e}"))?;
 
+    // TCP_DEFER_ACCEPT (Linux only): don't wake the accept loop on the
+    // bare three-way handshake — wait until the client actually sends
+    // the first byte of the HTTP request. A cold-connect flood
+    // otherwise spins up Tokio tasks that immediately block in hyper's
+    // header-read (or, if no data ever arrives, burn a file descriptor
+    // until the header_read_timeout fires 10s later — see app.rs's
+    // AutoBuilder config). Timeout arg is seconds after SYN-ACK before
+    // the kernel gives up and delivers the bare accept anyway; keeping
+    // it modest so half-open connections still surface within the
+    // header-read budget.
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = socket.as_raw_fd();
+        let secs: libc::c_int = 10;
+        unsafe {
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_TCP,
+                libc::TCP_DEFER_ACCEPT,
+                &secs as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&secs) as libc::socklen_t,
+            );
+        }
+    }
+
     // Large backlog to avoid SYN drops at 200k+ QPS.
     socket
         .listen(8192)
