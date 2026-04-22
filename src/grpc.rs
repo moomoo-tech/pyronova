@@ -29,7 +29,7 @@
 
 use bytes::{BufMut, Bytes, BytesMut};
 use futures_util::stream;
-use http_body_util::{BodyExt, StreamBody};
+use http_body_util::{BodyExt, Limited, StreamBody};
 use hyper::body::{Frame, Incoming};
 use hyper::header::HeaderValue;
 use hyper::{HeaderMap, Request, Response, StatusCode};
@@ -55,9 +55,18 @@ pub(crate) async fn handle_grpc(
     req: Request<Incoming>,
 ) -> Result<Response<BoxBody>, hyper::Error> {
     let path = req.uri().path().to_string();
-    let collected = match req.into_body().collect().await {
+    // Guard body read with the same size cap the rest of the server
+    // uses. gRPC is normally small messages (< 4 KB for the Arena
+    // GetSum proto) but we're serving on the same ports as HTTP — a
+    // malicious client pushing a multi-GB body through an
+    // `application/grpc` content-type would OOM the process without
+    // this cap. `Limited::collect` yields an Error once the cap is
+    // crossed, and we fold that into `RESOURCE_EXHAUSTED` (gRPC
+    // status 8) for the caller.
+    let limited = Limited::new(req.into_body(), crate::handlers::max_body_size());
+    let collected = match limited.collect().await {
         Ok(c) => c.to_bytes(),
-        Err(_) => return Ok(grpc_reply_trailers(None, "13", "body read failed")),
+        Err(_) => return Ok(grpc_reply_trailers(None, "8", "body too large")),
     };
 
     if collected.len() < 5 {

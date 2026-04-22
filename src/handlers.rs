@@ -31,7 +31,7 @@ pub(crate) fn set_max_body_size(size: usize) {
     MAX_BODY_SIZE.store(size, std::sync::atomic::Ordering::Relaxed);
 }
 
-fn max_body_size() -> usize {
+pub(crate) fn max_body_size() -> usize {
     MAX_BODY_SIZE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
