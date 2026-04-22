@@ -26,7 +26,17 @@ enum WsMsg {
 
 #[pyclass(name = "WebSocket")]
 pub(crate) struct PyronovaWebSocket {
-    incoming_rx: std::sync::Mutex<std::sync::mpsc::Receiver<WsMsg>>,
+    // Bounded tokio channel so the hyper → Python path has TCP-level
+    // backpressure: if the Python handler falls behind, the tokio
+    // reader's `send().await` suspends, hyper stops reading the
+    // socket, the kernel closes the receive window, the client slows
+    // down. The previous `std::sync::mpsc::channel()` was unbounded
+    // and turned that backpressure chain into an unbounded memory
+    // sink — a single fast client could drive a multi-GB queue while
+    // the Python handler ran a slow computation. 256 slots matches
+    // OUTGOING_CAP order of magnitude and is small enough that a
+    // stuck consumer notices immediately.
+    incoming_rx: std::sync::Mutex<tokio::sync::mpsc::Receiver<WsMsg>>,
     outgoing_tx: std::sync::Mutex<Option<tokio::sync::mpsc::Sender<WsMsg>>>,
 }
 
@@ -41,9 +51,9 @@ impl PyronovaWebSocket {
     /// Python server in disguise.
     fn recv(&self, py: Python<'_>) -> Option<String> {
         py.detach(|| {
-            let rx = self.incoming_rx.lock().unwrap();
+            let mut rx = self.incoming_rx.lock().unwrap();
             loop {
-                match rx.recv().ok()? {
+                match rx.blocking_recv()? {
                     WsMsg::Text(s) => return Some(s),
                     WsMsg::Binary(_) => continue,
                 }
@@ -55,9 +65,9 @@ impl PyronovaWebSocket {
     /// Releases the GIL while waiting — see `recv` for rationale.
     fn recv_bytes(&self, py: Python<'_>) -> Option<Vec<u8>> {
         py.detach(|| {
-            let rx = self.incoming_rx.lock().unwrap();
+            let mut rx = self.incoming_rx.lock().unwrap();
             loop {
-                match rx.recv().ok()? {
+                match rx.blocking_recv()? {
                     WsMsg::Binary(b) => return Some(b),
                     WsMsg::Text(_) => continue,
                 }
@@ -71,8 +81,8 @@ impl PyronovaWebSocket {
         // Release the GIL across the blocking recv; re-acquire to build the
         // Python-typed return value.
         let msg = py.detach(|| {
-            let rx = self.incoming_rx.lock().unwrap();
-            rx.recv().ok()
+            let mut rx = self.incoming_rx.lock().unwrap();
+            rx.blocking_recv()
         })?;
         match msg {
             WsMsg::Text(s) => Some((
@@ -222,7 +232,9 @@ where
 {
     let (mut ws_sink, mut ws_source) = ws_stream.split();
 
-    let (incoming_tx, incoming_rx) = std::sync::mpsc::channel::<WsMsg>();
+    // Bounded — see PyronovaWebSocket::incoming_rx docstring for why.
+    const INCOMING_CAP: usize = 256;
+    let (incoming_tx, incoming_rx) = tokio::sync::mpsc::channel::<WsMsg>(INCOMING_CAP);
     // Bounded outgoing: if the Python handler produces faster than the
     // client reads (TCP backpressure builds in ws_sink), we must stop
     // accepting new messages rather than buffer to OOM. `try_send` on
@@ -298,21 +310,24 @@ where
     // Message pump: forward between PyronovaWebSocket and Python channels
     loop {
         tokio::select! {
-            // Client → Python (via incoming_tx)
+            // Client → Python (via incoming_tx). `send().await` applies
+            // backpressure: if Python's handler is slow and the channel
+            // fills, the await suspends, which stops this select arm
+            // from re-polling ws_source, which lets hyper's receive
+            // buffer fill, which closes the TCP window — flow control
+            // reaches all the way to the wire.
             msg = ws_source.next() => {
                 match msg {
-                    Some(Ok(Message::Text(text)))
-                        if incoming_tx.send(WsMsg::Text(text.to_string())).is_err() =>
-                    {
-                        break;
+                    Some(Ok(Message::Text(text))) => {
+                        if incoming_tx.send(WsMsg::Text(text.to_string())).await.is_err() {
+                            break;
+                        }
                     }
-                    Some(Ok(Message::Text(_))) => {}
-                    Some(Ok(Message::Binary(data)))
-                        if incoming_tx.send(WsMsg::Binary(data.to_vec())).is_err() =>
-                    {
-                        break;
+                    Some(Ok(Message::Binary(data))) => {
+                        if incoming_tx.send(WsMsg::Binary(data.to_vec())).await.is_err() {
+                            break;
+                        }
                     }
-                    Some(Ok(Message::Binary(_))) => {}
                     Some(Ok(Message::Close(_))) | None => {
                         break;
                     }

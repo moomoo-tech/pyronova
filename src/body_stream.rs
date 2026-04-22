@@ -81,38 +81,39 @@ impl PyronovaBodyStream {
     /// Block until the next chunk arrives. Returns `bytes` for data,
     /// raises `StopIteration` at EOF, `IOError(msg)` on transport error.
     fn __next__(&self, py: Python<'_>) -> PyResult<Py<PyBytes>> {
-        // Take the receiver out of the Mutex for the blocking recv() call.
-        // We can't hold the MutexGuard across a blocking recv() because that
-        // would block *other* Python threads trying to interact with the
-        // same stream object. Release the GIL during the recv so other
-        // threads can make progress.
-        let rx_opt = { self.rx.lock().unwrap().take() };
-        let Some(mut rx) = rx_opt else {
+        // Hold the Mutex guard across the blocking recv(). Concurrent
+        // callers (two Python threads iterating the same stream, or an
+        // asyncio.gather(...) that races __next__ against drain_count)
+        // will serialize on this lock — exactly the semantics a single-
+        // owner byte stream demands. Each waiter receives the NEXT
+        // chunk in FIFO order once the earlier call completes.
+        //
+        // The previous implementation `take()`'d the receiver out of
+        // the Mutex to avoid holding the guard across the blocking
+        // call — on the theory that a held guard would freeze other
+        // Python threads. It did freeze them, but the alternative was
+        // worse: the second concurrent __next__ observed `None` in
+        // the slot and raised a spurious StopIteration, silently
+        // truncating the request body without any error. Data loss in
+        // a body stream is strictly worse than brief contention.
+        //
+        // GIL: released across blocking_recv() so unrelated Python
+        // threads (different stream objects, ordinary app code)
+        // continue to run.
+        let mut guard = self.rx.lock().unwrap();
+        let Some(rx) = guard.as_mut() else {
             return Err(PyStopIteration::new_err("stream exhausted"));
         };
-
-        // tokio::sync::mpsc::Receiver::blocking_recv is explicitly designed
-        // for "call from a blocking context" — the handler thread here — and
-        // suspends until the feeder produces a frame. No polling, no
-        // busy-wait. Release the GIL while we wait so other Python threads
-        // make progress.
         let msg = py.detach(|| rx.blocking_recv());
-
         match msg {
-            Some(ChunkMsg::Data(b)) => {
-                // Put the receiver back for the next iteration.
-                *self.rx.lock().unwrap() = Some(rx);
-                Ok(PyBytes::new(py, &b).unbind())
-            }
-            Some(ChunkMsg::Eof) => {
-                // Drop receiver — subsequent __next__ fast-path to StopIteration.
+            Some(ChunkMsg::Data(b)) => Ok(PyBytes::new(py, &b).unbind()),
+            Some(ChunkMsg::Eof) | None => {
+                // Mark exhausted so subsequent calls fast-path without
+                // touching the receiver.
+                *guard = None;
                 Err(PyStopIteration::new_err(py.None()))
             }
             Some(ChunkMsg::Err(e)) => Err(PyIOError::new_err(e)),
-            None => {
-                // Sender dropped without sending Eof — treat as EOF.
-                Err(PyStopIteration::new_err(py.None()))
-            }
         }
     }
 
@@ -158,8 +159,13 @@ impl PyronovaBodyStream {
     ///
     /// Returns the raw byte count; raises IOError on transport error.
     fn drain_count(&self, py: Python<'_>) -> PyResult<u64> {
-        let rx_opt = { self.rx.lock().unwrap().take() };
-        let Some(mut rx) = rx_opt else {
+        // Same serialization guarantee as __next__: hold the Mutex
+        // across the drain loop. Concurrent callers (drain_count racing
+        // __next__ or drain_count racing drain_count) block on the
+        // lock and then observe `None` — returning 0 — because the
+        // first caller marked the stream exhausted.
+        let mut guard = self.rx.lock().unwrap();
+        let Some(rx) = guard.as_mut() else {
             return Ok(0);
         };
         let result: Result<u64, String> = py.detach(|| {
@@ -172,6 +178,7 @@ impl PyronovaBodyStream {
                 }
             }
         });
+        *guard = None; // fully consumed (or errored)
         result.map_err(PyIOError::new_err)
     }
 }
