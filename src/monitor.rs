@@ -59,8 +59,7 @@ pub static TOTAL_REQUESTS: CachePadded<AtomicU64> = CachePadded::new(AtomicU64::
 /// request goes cold, reclaiming the last cross-core atomic in the
 /// TPC inline hot path. Users running in production with metrics
 /// dashboards flip PYRONOVA_METRICS=1 and pay the ~30ns/req back.
-static METRICS_ENABLED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static METRICS_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Initialize the metrics kill-switch. Called once at app.run() startup.
 /// Idempotent.

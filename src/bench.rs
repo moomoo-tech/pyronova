@@ -38,8 +38,7 @@ use crate::python::interp::SubInterpreterWorker;
 use crate::router::{FrozenRoutes, RouteTable};
 use crate::tpc::{elevate_thread_qos_macos, tpc_accept_loop_inline, try_pin_current};
 
-const INMEM_REQ: &[u8] =
-    b"GET / HTTP/1.1\r\nHost: inmem\r\nConnection: keep-alive\r\n\r\n";
+const INMEM_REQ: &[u8] = b"GET / HTTP/1.1\r\nHost: inmem\r\nConnection: keep-alive\r\n\r\n";
 const INMEM_BATCH: usize = 32;
 
 // ---------------------------------------------------------------------------
@@ -86,6 +85,7 @@ pub(crate) fn run_inmem_bench(
         .collect();
 
     let mut handles = Vec::with_capacity(n_threads);
+    #[allow(clippy::needless_range_loop)] // i indexes 3 parallel slices
     for i in 0..n_threads {
         let core_id = core_ids.get(i).copied();
         let worker = workers.remove(0);
@@ -311,8 +311,9 @@ pub(crate) fn run_loopback_bench(
                     .expect("lb srv rt");
                 let local = LocalSet::new();
                 let mut worker = worker;
-                worker.tstate =
-                    unsafe { crate::python::interp::rebind_tstate_to_current_thread(worker.tstate) };
+                worker.tstate = unsafe {
+                    crate::python::interp::rebind_tstate_to_current_thread(worker.tstate)
+                };
                 let worker = std::rc::Rc::new(std::cell::RefCell::new(worker));
                 local.block_on(&rt, async move {
                     tpc_accept_loop_inline(

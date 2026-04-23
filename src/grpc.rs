@@ -62,9 +62,7 @@ pub(crate) fn is_grpc_request(req: &Request<Incoming>) -> bool {
     ct.starts_with("application/grpc")
 }
 
-pub(crate) async fn handle_grpc(
-    req: Request<Incoming>,
-) -> Result<Response<BoxBody>, hyper::Error> {
+pub(crate) async fn handle_grpc(req: Request<Incoming>) -> Result<Response<BoxBody>, hyper::Error> {
     let path = req.uri().path().to_string();
     // Guard body read with the same size cap the rest of the server
     // uses. gRPC is normally small messages (< 4 KB for the Arena
@@ -83,9 +81,11 @@ pub(crate) async fn handle_grpc(
             // happened. Downcasting the boxed error is the documented way
             // to interrogate `Limited` (see its rustdoc example).
             return Ok(if e.downcast_ref::<LengthLimitError>().is_some() {
-                grpc_reply_trailers(None, status::RESOURCE_EXHAUSTED, "body too large") // RESOURCE_EXHAUSTED
+                grpc_reply_trailers(None, status::RESOURCE_EXHAUSTED, "body too large")
+            // RESOURCE_EXHAUSTED
             } else {
-                grpc_reply_trailers(None, status::UNAVAILABLE, "body read failed") // UNAVAILABLE
+                grpc_reply_trailers(None, status::UNAVAILABLE, "body read failed")
+                // UNAVAILABLE
             });
         }
     };
@@ -96,18 +96,30 @@ pub(crate) async fn handle_grpc(
     if collected[0] != 0 {
         // Non-zero = compressed. We don't advertise or understand any
         // codec beyond identity; tell the caller.
-        return Ok(grpc_reply_trailers(None, status::UNIMPLEMENTED, "compression unsupported"));
+        return Ok(grpc_reply_trailers(
+            None,
+            status::UNIMPLEMENTED,
+            "compression unsupported",
+        ));
     }
-    let payload_len = u32::from_be_bytes([collected[1], collected[2], collected[3], collected[4]])
-        as usize;
+    let payload_len =
+        u32::from_be_bytes([collected[1], collected[2], collected[3], collected[4]]) as usize;
     if collected.len() < 5 + payload_len {
-        return Ok(grpc_reply_trailers(None, status::INTERNAL, "truncated frame"));
+        return Ok(grpc_reply_trailers(
+            None,
+            status::INTERNAL,
+            "truncated frame",
+        ));
     }
     let payload = &collected[5..5 + payload_len];
 
     match path.as_str() {
         "/benchmark.BenchmarkService/GetSum" => get_sum(payload),
-        _ => Ok(grpc_reply_trailers(None, status::UNIMPLEMENTED, "unimplemented")),
+        _ => Ok(grpc_reply_trailers(
+            None,
+            status::UNIMPLEMENTED,
+            "unimplemented",
+        )),
     }
 }
 
@@ -128,7 +140,11 @@ fn get_sum(payload: &[u8]) -> Result<Response<BoxBody>, hyper::Error> {
             _ => {
                 // Unknown / non-varint field — proto3 says skip.
                 if wire_type != 0 {
-                    return Ok(grpc_reply_trailers(None, status::INTERNAL, "unsupported wire type"));
+                    return Ok(grpc_reply_trailers(
+                        None,
+                        status::INTERNAL,
+                        "unsupported wire type",
+                    ));
                 }
             }
         }

@@ -56,9 +56,9 @@ fn unpack_args<'py>(
     // correct here because the tuple's refcount is managed by the caller —
     // we borrow for the duration of this function only.
     let args_tuple = unsafe { Bound::from_borrowed_ptr(py, args) };
-    let tup = args_tuple.cast::<PyTuple>().map_err(|_| {
-        PyValueError::new_err("db bridge: expected positional argument tuple")
-    })?;
+    let tup = args_tuple
+        .cast::<PyTuple>()
+        .map_err(|_| PyValueError::new_err("db bridge: expected positional argument tuple"))?;
     if tup.len() < 2 {
         return Err(PyValueError::new_err(
             "db bridge: expected (sql: str, params: tuple|list)",
@@ -267,9 +267,5 @@ pub(crate) unsafe fn register_db_bridge(globals: *mut ffi::PyObject) {
         c"_pyronova_db_fetch_scalar",
         pyronova_db_fetch_scalar_cfunc,
     );
-    register_one(
-        globals,
-        c"_pyronova_db_execute",
-        pyronova_db_execute_cfunc,
-    );
+    register_one(globals, c"_pyronova_db_execute", pyronova_db_execute_cfunc);
 }

@@ -9,9 +9,9 @@ use pyo3::prelude::*;
 use pyo3::types::PyString;
 
 use crate::python::interp;
+use crate::python::stream::PyronovaStream;
 use crate::response::{error_response, extract_response_data, payload_too_large_response};
 use crate::router::FrozenRoutes;
-use crate::python::stream::PyronovaStream;
 use crate::types::{PyronovaRequest, PyronovaResponse, ResponseData};
 
 pub(crate) type SharedPool = Arc<interp::InterpreterPool>;
@@ -40,16 +40,16 @@ pub(crate) use tpc::handle_request_tpc_inline;
 /// the pre-split behavior. Measured 2% regression on bench_inmem
 /// Python w=6 without these hints.
 #[inline]
-pub(crate) async fn collect_body_bounded(
-    body: Incoming,
-) -> Result<Vec<u8>, Response<BoxBody>> {
+pub(crate) async fn collect_body_bounded(body: Incoming) -> Result<Vec<u8>, Response<BoxBody>> {
     use http_body_util::Limited;
     let max = max_body_size();
     let limited = Limited::new(body, max);
     match limited.collect().await {
         Ok(c) => Ok(c.to_bytes().to_vec()),
         Err(e) => {
-            if e.downcast_ref::<http_body_util::LengthLimitError>().is_some() {
+            if e.downcast_ref::<http_body_util::LengthLimitError>()
+                .is_some()
+            {
                 Err(full_body(payload_too_large_response()))
             } else {
                 Err(full_body(error_response("body read failed")))
@@ -67,6 +67,34 @@ static MAX_BODY_SIZE: std::sync::atomic::AtomicUsize =
 
 pub(crate) fn set_max_body_size(size: usize) {
     MAX_BODY_SIZE.store(size, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Decide whether to emit an access-log line for this request.
+///
+/// Three layers (cheapest first):
+///   1. logging not enabled → never.
+///   2. `always_status > 0` and response status meets it → always.
+///      Lets operators keep full visibility of 4xx/5xx without paying
+///      the per-request log cost on every 2xx.
+///   3. otherwise sample 1-in-N via the shared atomic counter on the
+///      route table. `sample_n=1` short-circuits to "log all" without
+///      touching the atomic.
+#[inline]
+pub(crate) fn should_log_request(routes: &crate::router::RouteTable, status: u16) -> bool {
+    if !routes.request_logging {
+        return false;
+    }
+    if routes.request_log_always_status > 0 && status >= routes.request_log_always_status {
+        return true;
+    }
+    let n = routes.request_log_sample_n;
+    if n <= 1 {
+        return true;
+    }
+    routes
+        .request_log_counter
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        .is_multiple_of(n)
 }
 
 #[inline]
@@ -318,7 +346,6 @@ pub(crate) async fn stream_body_feeder(
         // Trailer / metadata frames are ignored for body streaming.
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Shared: call handler with full middleware chain (runs in blocking thread)

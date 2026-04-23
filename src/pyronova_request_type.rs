@@ -500,10 +500,7 @@ unsafe extern "C" fn request_getbuffer(
     0
 }
 
-unsafe extern "C" fn request_releasebuffer(
-    _obj: *mut ffi::PyObject,
-    _view: *mut ffi::Py_buffer,
-) {
+unsafe extern "C" fn request_releasebuffer(_obj: *mut ffi::PyObject, _view: *mut ffi::Py_buffer) {
     // No-op: we didn't allocate anything in getbuffer that needs
     // freeing. PyBuffer_Release handles DECREF(view.obj) itself — we
     // just have to not do it again. The Vec's backing storage is

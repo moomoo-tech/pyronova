@@ -30,9 +30,9 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::handlers::handle_request;
-use crate::server::listener::{create_reuseport_listener, handle_accept_error, setup_tcp_quickack};
 use crate::python::interp::SubInterpreterWorker;
 use crate::router::FrozenRoutes;
+use crate::server::listener::{create_reuseport_listener, handle_accept_error, setup_tcp_quickack};
 use crate::websocket;
 
 /// Custom hyper executor that spawns onto the current thread's
@@ -84,10 +84,7 @@ pub(crate) fn elevate_thread_qos_macos() {
     // the whole qos.h shim; the value has been stable since 10.10.
     const QOS_CLASS_USER_INTERACTIVE: c_int = 0x21;
     extern "C" {
-        fn pthread_set_qos_class_self_np(
-            qos_class: c_int,
-            relative_priority: c_int,
-        ) -> c_int;
+        fn pthread_set_qos_class_self_np(qos_class: c_int, relative_priority: c_int) -> c_int;
     }
     unsafe {
         pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
@@ -431,9 +428,8 @@ fn run_tpc_subinterp_per_thread_listener(
     // — acceptable for a long-running server. `Arc::into_raw` + deref
     // is the stable-since-1.0 way to get this; the pointer is never
     // reclaimed, which is the whole point.
-    let routes_static: &'static crate::router::RouteTable = unsafe {
-        &*Arc::into_raw(Arc::clone(&routes))
-    };
+    let routes_static: &'static crate::router::RouteTable =
+        unsafe { &*Arc::into_raw(Arc::clone(&routes)) };
 
     let mut handles = Vec::with_capacity(n_threads);
     for i in 0..n_threads {
@@ -463,7 +459,16 @@ fn run_tpc_subinterp_per_thread_listener(
                 };
                 let worker = std::rc::Rc::new(std::cell::RefCell::new(worker));
                 local.block_on(&rt, async move {
-                    tpc_accept_loop_inline(addr, worker, routes_static, routes_arc, shutdown, tls, bridge).await;
+                    tpc_accept_loop_inline(
+                        addr,
+                        worker,
+                        routes_static,
+                        routes_arc,
+                        shutdown,
+                        tls,
+                        bridge,
+                    )
+                    .await;
                 });
             })
             .map_err(|e| format!("spawn tpc-{i}: {e}"))?;
@@ -533,9 +538,8 @@ fn run_tpc_subinterp_fanout(
 
     // Leak once for a shared &'static, same rationale as the per-thread
     // listener path. All workers read from the same static, no Arc ops.
-    let routes_static: &'static crate::router::RouteTable = unsafe {
-        &*Arc::into_raw(Arc::clone(&routes))
-    };
+    let routes_static: &'static crate::router::RouteTable =
+        unsafe { &*Arc::into_raw(Arc::clone(&routes)) };
 
     let mut handles = Vec::with_capacity(n_threads + 1);
 
@@ -561,11 +565,21 @@ fn run_tpc_subinterp_fanout(
                     .expect("tpc current-thread runtime build");
                 let local = LocalSet::new();
                 let mut worker = worker;
-                worker.tstate =
-                    unsafe { crate::python::interp::rebind_tstate_to_current_thread(worker.tstate) };
+                worker.tstate = unsafe {
+                    crate::python::interp::rebind_tstate_to_current_thread(worker.tstate)
+                };
                 let worker = std::rc::Rc::new(std::cell::RefCell::new(worker));
                 local.block_on(&rt, async move {
-                    tpc_worker_loop_fanout(rx, worker, routes_static, routes_arc, shutdown_w, tls, bridge).await;
+                    tpc_worker_loop_fanout(
+                        rx,
+                        worker,
+                        routes_static,
+                        routes_arc,
+                        shutdown_w,
+                        tls,
+                        bridge,
+                    )
+                    .await;
                 });
             })
             .map_err(|e| format!("spawn tpc-{i}: {e}"))?;
@@ -775,7 +789,8 @@ fn fire_gc(worker: &std::rc::Rc<std::cell::RefCell<SubInterpreterWorker>>) {
     }
     let tstate_cell = std::cell::Cell::new(w.tstate);
     unsafe {
-        let _guard = crate::python::interp::SubInterpGilGuard::acquire(tstate_cell.get(), &tstate_cell);
+        let _guard =
+            crate::python::interp::SubInterpGilGuard::acquire(tstate_cell.get(), &tstate_cell);
         // PyObject_CallNoArgs: skip the empty-tuple alloc the generic
         // PyObject_Call path requires. Idiomatic 3.9+ invocation.
         let res = ffi::PyObject_CallNoArgs(w.gc_collect_func);
@@ -833,8 +848,7 @@ pub(crate) async fn tpc_accept_loop_inline(
             // (one TPC thread — no atomics needed; the borrow is single-
             // threaded on this current_thread runtime).
             let mut requests_since_last_gc: u64 = 0;
-            let mut gc_timer =
-                tokio::time::interval(std::time::Duration::from_millis(idle_ms));
+            let mut gc_timer = tokio::time::interval(std::time::Duration::from_millis(idle_ms));
             // First tick fires immediately — skip it so we don't collect
             // an empty heap before any requests have run.
             gc_timer.tick().await;
@@ -883,32 +897,30 @@ pub(crate) async fn tpc_accept_loop_inline(
                 }
             }
         }
-        GcMode::Count | GcMode::Off => {
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = shutdown.cancelled() => break,
-                    res = listener.accept() => {
-                        match res {
-                            Ok((stream, remote_addr)) => {
-                                let _ = stream.set_nodelay(true);
-                                setup_tcp_quickack(&stream);
+        GcMode::Count | GcMode::Off => loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => break,
+                res = listener.accept() => {
+                    match res {
+                        Ok((stream, remote_addr)) => {
+                            let _ = stream.set_nodelay(true);
+                            setup_tcp_quickack(&stream);
 
-                                let worker_clone = std::rc::Rc::clone(&worker);
-                                let routes_arc_c = Arc::clone(&routes_arc);
-                                let conn_token = shutdown.clone();
-                                let tls_acc_c = tls_acceptor.clone();
-                                let bridge_c = main_bridge.clone();
-                                tracker.spawn_local(async move {
-                                    crate::worker::drive_tcp_conn(stream, remote_addr, worker_clone, routes_static, routes_arc_c, conn_token, tls_acc_c, bridge_c).await;
-                                });
-                            }
-                            Err(e) => handle_accept_error(&e).await,
+                            let worker_clone = std::rc::Rc::clone(&worker);
+                            let routes_arc_c = Arc::clone(&routes_arc);
+                            let conn_token = shutdown.clone();
+                            let tls_acc_c = tls_acceptor.clone();
+                            let bridge_c = main_bridge.clone();
+                            tracker.spawn_local(async move {
+                                crate::worker::drive_tcp_conn(stream, remote_addr, worker_clone, routes_static, routes_arc_c, conn_token, tls_acc_c, bridge_c).await;
+                            });
                         }
+                        Err(e) => handle_accept_error(&e).await,
                     }
                 }
             }
-        }
+        },
     }
     tracker.close();
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), tracker.wait()).await;
@@ -1002,7 +1014,6 @@ pub(crate) fn physical_core_count() -> usize {
         .map(|n| n.get())
         .unwrap_or(1)
 }
-
 
 pub(crate) fn env_enabled() -> bool {
     matches!(

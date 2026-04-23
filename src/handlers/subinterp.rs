@@ -203,7 +203,9 @@ pub(crate) async fn handle_request_subinterp(
                 crate::python::body_stream::CHANNEL_CAPACITY,
             );
             if !body_bytes.is_empty() {
-                let _ = tx.try_send(crate::python::body_stream::ChunkMsg::Data(body_bytes.clone()));
+                let _ = tx.try_send(crate::python::body_stream::ChunkMsg::Data(
+                    body_bytes.clone(),
+                ));
             }
             let _ = tx.try_send(crate::python::body_stream::ChunkMsg::Eof);
             Arc::new(std::sync::Mutex::new(Some(rx)))
@@ -252,7 +254,7 @@ pub(crate) async fn handle_request_subinterp(
         apply_cors(&mut resp, routes.cors_config.as_ref());
         let latency_us = start.elapsed().as_micros() as u64;
         let status = resp.status().as_u16();
-        if routes.request_logging {
+        if super::should_log_request(&routes, status) {
             tracing::info!(
                 target: "pyronova::access",
                 method = %method_log,
@@ -339,7 +341,7 @@ pub(crate) async fn handle_request_subinterp(
     apply_cors(&mut http_resp, pool.cors_config.as_ref());
     let latency_us = start.elapsed().as_micros() as u64;
     let status = http_resp.status().as_u16();
-    if routes.request_logging {
+    if super::should_log_request(&routes, status) {
         tracing::info!(
             target: "pyronova::access",
             method = %method_log,

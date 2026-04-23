@@ -1246,11 +1246,7 @@ def _attach_pyronova_request_helpers(t):\n    from urllib.parse import parse_qs\
             } else {
                 headers.clone()
             },
-            body: if skip_body {
-                Vec::new()
-            } else {
-                body.to_vec()
-            },
+            body: if skip_body { Vec::new() } else { body.to_vec() },
         });
 
         // Transfer ownership of each new ref into the instance.

@@ -44,8 +44,9 @@ pub(crate) struct PyronovaRequest {
     /// return None. Stored as raw receiver (not `Py<PyronovaBodyStream>`) to
     /// keep `drop_in_place::<PyronovaRequest>` free of `_Py_Dealloc` — that
     /// would break `cargo test` linking for the pure-Rust unit tests.
-    pub(crate) body_stream_rx:
-        Arc<std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<crate::python::body_stream::ChunkMsg>>>>,
+    pub(crate) body_stream_rx: Arc<
+        std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<crate::python::body_stream::ChunkMsg>>>,
+    >,
     /// Cached parse of the query string. `form_urlencoded::parse + collect`
     /// costs ~100-200 ns for a two-param query and building a fresh
     /// Python dict on top is another ~500 ns. OnceLock matches the

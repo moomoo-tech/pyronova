@@ -18,9 +18,7 @@ use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use hyper::{Request, Response};
 
-use crate::response::{
-    build_response, not_found_response, payload_too_large_response,
-};
+use crate::response::{build_response, not_found_response, payload_too_large_response};
 use crate::router::FrozenRoutes;
 use crate::static_fs::try_static_file;
 use crate::types::PyronovaRequest;
@@ -183,7 +181,7 @@ pub(crate) async fn handle_request(
     apply_cors(&mut resp, routes.cors_config.as_ref());
     let latency_us = start.elapsed().as_micros() as u64;
     let status = resp.status().as_u16();
-    if routes.request_logging {
+    if super::should_log_request(&routes, status) {
         tracing::info!(
             target: "pyronova::access",
             method = %method_log,

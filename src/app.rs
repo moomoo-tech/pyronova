@@ -14,9 +14,7 @@ use tokio::signal;
 use crate::handlers::{handle_request, handle_request_subinterp};
 use crate::python::interp;
 use crate::router::{FrozenRoutes, MutableRoutes, RouteTable};
-use crate::server::listener::{
-    create_reuseport_listener, handle_accept_error, setup_tcp_quickack,
-};
+use crate::server::listener::{create_reuseport_listener, handle_accept_error, setup_tcp_quickack};
 use crate::state::SharedState;
 use crate::websocket;
 
@@ -29,6 +27,12 @@ pub(crate) struct PyronovaApp {
     cors_config: Option<crate::router::CorsConfig>,
     /// Per-instance request logging flag.
     request_logging: bool,
+    /// Per-instance access-log sampling. See RouteTable for semantics.
+    request_log_sample_n: u64,
+    request_log_always_status: u16,
+    /// Shared counter for sampled-request rolls. Cloned (Arc) into every
+    /// RouteTable snapshot so all worker copies share the same roll.
+    request_log_counter: Arc<std::sync::atomic::AtomicU64>,
     /// Opt into Thread-Per-Core mode. See docs/tpc-rearch.md. Can also
     /// be flipped via the `PYRONOVA_TPC=1` env var; either is sufficient.
     tpc: bool,
@@ -44,6 +48,9 @@ impl PyronovaApp {
             shared_state: Arc::new(dashmap::DashMap::new()),
             cors_config: None,
             request_logging: false,
+            request_log_sample_n: 1,
+            request_log_always_status: 0,
+            request_log_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             tpc: false,
         }
     }
@@ -105,6 +112,19 @@ impl PyronovaApp {
     /// Enable/disable per-instance request logging.
     fn enable_request_logging(&mut self, enabled: bool) {
         self.request_logging = enabled;
+    }
+
+    /// Configure access-log sampling. `sample_n=1` (default) logs every
+    /// request; `sample_n=100` logs ~1% of requests. `always_status` is
+    /// the lower bound for "always log regardless of sampling" — set to
+    /// `400` to keep full visibility of 4xx/5xx while sampling 2xx, or
+    /// `0` (default) to apply sampling uniformly.
+    ///
+    /// Has no effect unless `enable_request_logging(True)` is also set.
+    #[pyo3(signature = (sample_n=1, always_status=0))]
+    fn set_request_log_sampling(&mut self, sample_n: u64, always_status: u16) {
+        self.request_log_sample_n = sample_n.max(1);
+        self.request_log_always_status = always_status;
     }
 
     /// Set max request body size in bytes. Default: 10 MB.
@@ -379,6 +399,9 @@ impl PyronovaApp {
                 static_dirs: table.static_dirs.clone(),
                 cors_config: self.cors_config.clone(),
                 request_logging: self.request_logging,
+                request_log_sample_n: self.request_log_sample_n,
+                request_log_always_status: self.request_log_always_status,
+                request_log_counter: Arc::clone(&self.request_log_counter),
                 fast_responses: table.fast_responses.clone(),
             })
         };
@@ -423,8 +446,7 @@ impl PyronovaApp {
             std::env::var("PYRONOVA_TPC").ok().as_deref(),
             Some("0") | Some("off") | Some("no") | Some("false")
         );
-        let tpc_explicit_opt_in =
-            tpc.unwrap_or(false) || self.tpc || crate::tpc::env_enabled();
+        let tpc_explicit_opt_in = tpc.unwrap_or(false) || self.tpc || crate::tpc::env_enabled();
         // Explicit opt-in on an incompatible route set is a startup
         // error (existing behavior in run_tpc_subinterp). Implicit
         // default on incompatible set silently falls back — this is
@@ -1064,9 +1086,7 @@ impl PyronovaApp {
 
         // Read the user script once.
         let raw_script = std::fs::read_to_string(&script_path).map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "read script '{script_path}': {e}"
-            ))
+            pyo3::exceptions::PyRuntimeError::new_err(format!("read script '{script_path}': {e}"))
         })?;
 
         // Allocate a pool_id for this TPC server — still used by the
@@ -1082,12 +1102,17 @@ impl PyronovaApp {
         let mut workers = Vec::with_capacity(n_threads);
         for i in 0..n_threads {
             let w = unsafe {
-                interp::SubInterpreterWorker::new(&raw_script, &script_path, &all_func_names, pool_id)
-                    .map_err(|e| {
-                        pyo3::exceptions::PyRuntimeError::new_err(format!(
-                            "TPC sub-interp {i} init: {e}"
-                        ))
-                    })?
+                interp::SubInterpreterWorker::new(
+                    &raw_script,
+                    &script_path,
+                    &all_func_names,
+                    pool_id,
+                )
+                .map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "TPC sub-interp {i} init: {e}"
+                    ))
+                })?
             };
             workers.push(w);
         }
@@ -1097,13 +1122,28 @@ impl PyronovaApp {
         // routes on a single MPSC-fed worker with the main GIL, while
         // TPC threads handle the rest inline. See src/main_bridge.rs.
         let main_bridge = if gil_count > 0 {
+            // 4 workers default — handlers mix CPU + I/O. Pure-CPU
+            // (numpy) workloads serialize on the GIL anyway so extra
+            // workers cost only thread-stack memory; I/O-bound (DB,
+            // file, sleep, sqlx-via-runtime) workloads gain real
+            // concurrency because each worker can pick up the GIL the
+            // moment a peer's handler releases it.
+            let workers: usize = std::env::var("PYRONOVA_GIL_BRIDGE_WORKERS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .filter(|&n: &usize| n > 0)
+                .unwrap_or(4);
+            // Capacity scales with workers so per-worker queue depth
+            // stays at 16 (matches the original single-thread design's
+            // back-pressure behavior).
             let capacity: usize = std::env::var("PYRONOVA_GIL_BRIDGE_CAPACITY")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(16);
+                .unwrap_or(16 * workers);
             Some(crate::bridge::main_bridge::MainInterpBridge::spawn(
                 Arc::clone(&routes),
                 capacity,
+                workers,
             ))
         } else {
             None
@@ -1161,6 +1201,9 @@ impl PyronovaApp {
                 static_dirs: table.static_dirs.clone(),
                 cors_config: self.cors_config.clone(),
                 request_logging: self.request_logging,
+                request_log_sample_n: self.request_log_sample_n,
+                request_log_always_status: self.request_log_always_status,
+                request_log_counter: Arc::clone(&self.request_log_counter),
                 fast_responses: table.fast_responses.clone(),
             })
         };
@@ -1199,15 +1242,13 @@ impl PyronovaApp {
             main_mod.getattr("__file__")?.extract::<String>()?
         };
         let mut all_func_names: Vec<String> = handler_names_from_routes;
-        all_func_names.extend(before_hook_names.into_iter());
-        all_func_names.extend(after_hook_names.into_iter());
+        all_func_names.extend(before_hook_names);
+        all_func_names.extend(after_hook_names);
 
         crate::monitor::init_metrics_flag();
         std::env::set_var("PYRONOVA_WORKER", "1");
         let raw_script = std::fs::read_to_string(&script_path).map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "read script '{script_path}': {e}"
-            ))
+            pyo3::exceptions::PyRuntimeError::new_err(format!("read script '{script_path}': {e}"))
         })?;
         let pool_id = interp::next_pool_id();
         let mut built_workers = Vec::with_capacity(n_threads);
@@ -1272,6 +1313,9 @@ impl PyronovaApp {
                 static_dirs: table.static_dirs.clone(),
                 cors_config: self.cors_config.clone(),
                 request_logging: self.request_logging,
+                request_log_sample_n: self.request_log_sample_n,
+                request_log_always_status: self.request_log_always_status,
+                request_log_counter: Arc::clone(&self.request_log_counter),
                 fast_responses: table.fast_responses.clone(),
             })
         };
@@ -1299,9 +1343,7 @@ impl PyronovaApp {
         crate::monitor::init_metrics_flag();
         std::env::set_var("PYRONOVA_WORKER", "1");
         let raw_script = std::fs::read_to_string(&script_path).map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "read script '{script_path}': {e}"
-            ))
+            pyo3::exceptions::PyRuntimeError::new_err(format!("read script '{script_path}': {e}"))
         })?;
         let pool_id = interp::next_pool_id();
         let mut built_workers = Vec::with_capacity(n_threads);

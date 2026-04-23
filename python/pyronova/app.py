@@ -660,12 +660,28 @@ class Pyronova:
     # Logging
     # ------------------------------------------------------------------
 
-    def enable_logging(self, level: str = "info") -> None:
+    def enable_logging(
+        self,
+        level: str = "info",
+        sample: int = 1,
+        always_log_status: int = 0,
+    ) -> None:
         """Enable structured request/response logging.
 
         This activates both:
         - Rust-side access log (method, path, status, latency_us) via tracing
         - Python-side formatted output for GIL mode (human-readable)
+
+        :param level: minimum log level — "debug" / "info" / "warn" / "error".
+        :param sample: log 1 in every ``sample`` requests. ``1`` (default)
+            logs every request. ``100`` keeps roughly 1% — production knob
+            to recover the 25-30% throughput tax of full access logging
+            while retaining a usable observability sample. Per-route
+            atomic counter; sampling decision is global.
+        :param always_log_status: bypass sampling for responses whose
+            status is >= this value. ``400`` keeps full visibility of
+            4xx/5xx errors while sampling 2xx success traffic. ``0``
+            (default) applies sampling uniformly.
 
         Output format (GIL mode, text format)::
 
@@ -720,6 +736,10 @@ class Pyronova:
 
         # Also enable Rust-level logging for sub-interpreter mode (per-instance)
         self._engine.enable_request_logging(True)
+        # Sampling / always-log knobs land on the Rust route table; the
+        # decision happens inside each handler's logging path.
+        if sample > 1 or always_log_status > 0:
+            self._engine.set_request_log_sampling(sample, always_log_status)
 
         # Upgrade log config so the deferred init_logger picks up access_log
         level_map = {"debug": "DEBUG", "info": "INFO", "warn": "WARN", "error": "ERROR"}

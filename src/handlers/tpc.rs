@@ -125,22 +125,24 @@ pub(crate) async fn handle_request_tpc_inline(
     // TPC inline hot path (sync + non-gil + non-stream) never touches
     // `body_stream_rx` and pays no Arc::clone for a value it won't use.
     let is_stream_route = routes.is_stream[handler_idx];
-    let (body_bytes, stream_rx): (Vec<u8>, Option<tokio::sync::mpsc::Receiver<crate::python::body_stream::ChunkMsg>>) =
-        if is_stream_route {
-            let (tx, rx) = tokio::sync::mpsc::channel::<crate::python::body_stream::ChunkMsg>(
-                crate::python::body_stream::CHANNEL_CAPACITY,
-            );
-            tokio::task::spawn_local(stream_body_feeder(body_obj, tx, max_body_size()));
-            (Vec::new(), Some(rx))
-        } else {
-            match collect_body_bounded(body_obj).await {
-                Ok(b) => (b, None),
-                Err(mut r) => {
-                    apply_cors(&mut r, routes.cors_config.as_ref());
-                    return Ok(r);
-                }
+    let (body_bytes, stream_rx): (
+        Vec<u8>,
+        Option<tokio::sync::mpsc::Receiver<crate::python::body_stream::ChunkMsg>>,
+    ) = if is_stream_route {
+        let (tx, rx) = tokio::sync::mpsc::channel::<crate::python::body_stream::ChunkMsg>(
+            crate::python::body_stream::CHANNEL_CAPACITY,
+        );
+        tokio::task::spawn_local(stream_body_feeder(body_obj, tx, max_body_size()));
+        (Vec::new(), Some(rx))
+    } else {
+        match collect_body_bounded(body_obj).await {
+            Ok(b) => (b, None),
+            Err(mut r) => {
+                apply_cors(&mut r, routes.cors_config.as_ref());
+                return Ok(r);
             }
-        };
+        }
+    };
 
     let headers = extract_headers(&raw_headers);
 
@@ -152,7 +154,11 @@ pub(crate) async fn handle_request_tpc_inline(
     // oneshot.await — everything else stays on the main interp. Full
     // MPSC queue → 503 fast (GIL-bound path mustn't back up and stall
     // the 440k rps sub-interp fleet). See src/main_bridge.rs for design.
-    let is_gil_route = routes.requires_gil.get(handler_idx).copied().unwrap_or(false);
+    let is_gil_route = routes
+        .requires_gil
+        .get(handler_idx)
+        .copied()
+        .unwrap_or(false);
     if is_gil_route {
         let bridge = match main_bridge {
             Some(b) => b,
@@ -204,17 +210,13 @@ pub(crate) async fn handle_request_tpc_inline(
             apply_cors(&mut r, routes.cors_config.as_ref());
             return Ok(r);
         }
-        let result = match tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            response_rx,
-        )
-        .await
+        let result = match tokio::time::timeout(std::time::Duration::from_secs(30), response_rx)
+            .await
         {
             Ok(Ok(r)) => r,
             Ok(Err(_)) => Err("bridge dropped response".to_string()),
             Err(_) => {
-                crate::monitor::DROPPED_REQUESTS
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                crate::monitor::DROPPED_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let mut r = full_body(gateway_timeout_response());
                 apply_cors(&mut r, routes.cors_config.as_ref());
                 return Ok(r);
@@ -240,7 +242,7 @@ pub(crate) async fn handle_request_tpc_inline(
         apply_cors(&mut http_resp, routes.cors_config.as_ref());
         let latency_us = start.elapsed().as_micros() as u64;
         let status = http_resp.status().as_u16();
-        if routes.request_logging {
+        if super::should_log_request(routes, status) {
             tracing::info!(
                 target: "pyronova::access",
                 method = %method,
@@ -264,8 +266,7 @@ pub(crate) async fn handle_request_tpc_inline(
         let mut worker_ref = worker.borrow_mut();
         let tstate_cell = std::cell::Cell::new(worker_ref.tstate);
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-            let _guard =
-                interp::SubInterpGilGuard::acquire(tstate_cell.get(), &tstate_cell);
+            let _guard = interp::SubInterpGilGuard::acquire(tstate_cell.get(), &tstate_cell);
             worker_ref.call_handler(
                 &routes.handler_names[handler_idx],
                 &routes.before_hook_names,
@@ -289,10 +290,7 @@ pub(crate) async fn handle_request_tpc_inline(
     let mut http_resp = match result {
         Ok(mut resp) => {
             let ct_owned: String = resp.content_type.clone().unwrap_or_else(|| {
-                if resp.is_json
-                    || resp.body.starts_with(b"{")
-                    || resp.body.starts_with(b"[")
-                {
+                if resp.is_json || resp.body.starts_with(b"{") || resp.body.starts_with(b"[") {
                     "application/json".to_string()
                 } else {
                     "text/plain; charset=utf-8".to_string()
@@ -322,7 +320,7 @@ pub(crate) async fn handle_request_tpc_inline(
     apply_cors(&mut http_resp, routes.cors_config.as_ref());
     let latency_us = start.elapsed().as_micros() as u64;
     let status = http_resp.status().as_u16();
-    if routes.request_logging {
+    if super::should_log_request(routes, status) {
         tracing::info!(
             target: "pyronova::access",
             method = %method,

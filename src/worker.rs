@@ -120,7 +120,11 @@ pub(crate) async fn drive_conn<IO>(
                 let worker = std::rc::Rc::clone(&worker);
                 let bridge = main_bridge.clone();
                 let is_ws = websocket::is_websocket_upgrade(&req);
-                let ws_routes = if is_ws { Some(Arc::clone(&ws_routes_conn)) } else { None };
+                let ws_routes = if is_ws {
+                    Some(Arc::clone(&ws_routes_conn))
+                } else {
+                    None
+                };
                 async move {
                     if is_ws {
                         websocket::handle_websocket(req, ws_routes.expect("ws routes set")).await
@@ -136,9 +140,7 @@ pub(crate) async fn drive_conn<IO>(
             let svc = service_fn(move |req: Request<Incoming>| {
                 let worker = std::rc::Rc::clone(&worker);
                 let bridge = main_bridge.clone();
-                async move {
-                    handle_request_tpc_inline(req, routes, worker, remote_addr, bridge).await
-                }
+                async move { handle_request_tpc_inline(req, routes, worker, remote_addr, bridge).await }
             });
             let conn = builder.serve_connection(io, svc);
             drive_to_completion!(conn);
@@ -149,6 +151,7 @@ pub(crate) async fn drive_conn<IO>(
 /// TCP adapter: TLS handshake (if configured), then hand off to the
 /// generic driver. Keeps the TLS decision at the transport boundary
 /// so the inner driver stays transport-agnostic.
+#[allow(clippy::too_many_arguments)] // single-call adapter, args mirror the per-thread context
 pub(crate) async fn drive_tcp_conn(
     stream: tokio::net::TcpStream,
     remote_addr: std::net::SocketAddr,

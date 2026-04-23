@@ -50,6 +50,22 @@ pub(crate) struct RouteTable {
     pub(crate) static_dirs: Vec<(String, String)>,
     pub(crate) cors_config: Option<CorsConfig>,
     pub(crate) request_logging: bool,
+    /// Sample 1-in-N requests when access logging is enabled. `1` (the
+    /// default) logs every request; `100` keeps roughly 1% of normal
+    /// traffic to keep observability without paying full log cost. The
+    /// `request_log_always_status` floor is checked first — a 5xx
+    /// always logs even if it loses the sampling roll.
+    pub(crate) request_log_sample_n: u64,
+    /// Bypass sampling for responses with status >= this value. Set to
+    /// 400 to "always log errors, sample successes". `0` (default)
+    /// disables the bypass — sampling applies to every status.
+    pub(crate) request_log_always_status: u16,
+    /// Atomic counter advanced once per sampled request. Held in an
+    /// Arc so route-table clones share the same sample roll — without
+    /// this, each TPC worker's per-thread copy would have its own
+    /// counter and `sample_n=100` would log N% of every worker's
+    /// traffic = effectively N × workers % overall.
+    pub(crate) request_log_counter: Arc<std::sync::atomic::AtomicU64>,
     /// Exact-match (METHOD, path) → pre-built response, served from
     /// the accept loop before any Python dispatch. Nested map keyed
     /// by method then path so the lookup accepts `&str` directly via
@@ -78,6 +94,9 @@ impl RouteTable {
             static_dirs: Vec::new(),
             cors_config: None,
             request_logging: false,
+            request_log_sample_n: 1,
+            request_log_always_status: 0,
+            request_log_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             fast_responses: HashMap::new(),
         }
     }

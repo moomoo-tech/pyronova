@@ -7,22 +7,38 @@
 //!
 //! Architecture:
 //!
-//!   N TPC threads ──(tokio::sync::mpsc::channel, capacity=16)──▶ 1 main-interp thread
+//!   N TPC threads ──(crossbeam::bounded(cap), MPMC)──▶ M bridge worker threads
 //!                            ↑                                          │
-//!                            │ bounded                                  │ Python::attach
-//!                       try_send → 503 on full                          │ (main GIL)
-//!                            │                                          │
+//!                            │ bounded, try_send → 503 on full          │ Python::attach
+//!                            │                                          │ (main GIL)
 //!                            ◀─────────(tokio::sync::oneshot)─────────── ◁
 //!                              response via oneshot per request
 //!
+//! Why M > 1: Python's GIL is a *runtime* lock, not a per-thread one.
+//! When a `gil=True` handler does I/O (file read, socket call, sleep,
+//! sqlx fetch via `runtime().block_on`) the underlying C call releases
+//! the GIL. With a single bridge thread, that I/O blocks the *thread*
+//! even though the GIL is free — new GIL work piles up in the channel
+//! until it 503s, while the main interp sits idle.
+//!
+//! With M worker threads, the released GIL is immediately picked up by
+//! the next worker. CPU-bound numpy-style handlers still serialize on
+//! the GIL (correct), but I/O-bound handlers see real concurrency
+//! (limited by the worker count, not by the bridge fan-in width).
+//!
+//! Worker count defaults to 4 (typical: handlers mix CPU + I/O); set
+//! `PYRONOVA_GIL_BRIDGE_WORKERS` to override. Channel capacity defaults
+//! to 16 *per worker* so the back-pressure ratio stays the same as the
+//! original single-thread design.
+//!
 //! Throughput contract: the bridge is a *cold path*. CPython's GIL caps
-//! the main-interp thread at the single-thread rate of whatever the
-//! handler's work is (typically ≤ 10k rps for numpy-class workloads,
-//! often much less). The channel capacity is deliberately small (16) so
-//! that when the bridge is saturated, TPC threads 503 *fast* rather
-//! than accumulating memory on a queue that services slower than the
-//! fleet's inbound rate. The rest of the fleet (pure sub-interp routes)
-//! keeps running at TPC speed — the GIL-bound slowdown stays contained.
+//! parallel CPU at the single-thread rate of whatever the handler's
+//! work is (typically ≤ 10k rps for numpy-class workloads, often much
+//! less). The channel capacity is deliberately small so that when the
+//! bridge is saturated, TPC threads 503 *fast* rather than accumulating
+//! memory on a queue that services slower than the fleet's inbound rate.
+//! The rest of the fleet (pure sub-interp routes) keeps running at TPC
+//! speed — the GIL-bound slowdown stays contained.
 //!
 //! `dispatch_one` reuses the existing `call_handler_with_hooks` from
 //! `handlers.rs` — same semantics as the non-TPC GIL path: before hooks
@@ -35,7 +51,8 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 use bytes::Bytes;
-use tokio::sync::{mpsc, oneshot};
+use crossbeam_channel as cbc;
+use tokio::sync::oneshot;
 
 use crate::handlers::{call_handler_with_hooks, HandlerResult, StreamInfo};
 use crate::router::FrozenRoutes;
@@ -75,68 +92,86 @@ pub(crate) struct GilWorkItem {
 /// Handle returned to callers. Cheap to Arc-share across all TPC
 /// threads.
 pub(crate) struct MainInterpBridge {
-    tx: mpsc::Sender<GilWorkItem>,
-    // Join handle deliberately dropped-detached. The bridge thread
-    // exits when the mpsc Sender count hits zero (server shutdown
+    tx: cbc::Sender<GilWorkItem>,
+    // Worker JoinHandles are deliberately dropped-detached. Workers
+    // exit when the crossbeam Sender count hits zero (server shutdown
     // dropping Arcs). At that point main interp cleanup runs naturally.
 }
 
 impl MainInterpBridge {
-    /// Spawn the main-interp bridge thread with an mpsc channel of the
-    /// given capacity. Returns an Arc-safe handle for cloning to every
-    /// TPC thread's dispatch path. Channel capacity should be small
-    /// (default 16) — see module doc for why.
-    pub(crate) fn spawn(routes: FrozenRoutes, capacity: usize) -> Arc<Self> {
-        let (tx, mut rx) = mpsc::channel::<GilWorkItem>(capacity);
-        let routes_owned = routes;
+    /// Spawn `workers` main-interp bridge threads sharing a single
+    /// crossbeam MPMC channel of the given capacity. Returns an
+    /// Arc-safe handle for cloning to every TPC thread's dispatch path.
+    ///
+    /// `capacity` is *total* (not per-worker) so the operator's mental
+    /// model — "how many requests can queue before 503" — stays simple.
+    /// Defaults applied at the call site in src/app.rs:
+    ///   PYRONOVA_GIL_BRIDGE_WORKERS=4
+    ///   PYRONOVA_GIL_BRIDGE_CAPACITY=16 × workers
+    pub(crate) fn spawn(routes: FrozenRoutes, capacity: usize, workers: usize) -> Arc<Self> {
+        let workers = workers.max(1);
+        let (tx, rx) = cbc::bounded::<GilWorkItem>(capacity);
 
-        // The bridge thread intentionally does NOT spin up a tokio
-        // runtime. Python handlers on the main interp may call
+        // Bridge workers intentionally do NOT spin up a tokio runtime.
+        // Python handlers on the main interp may call
         // `req.stream.drain_count()` which internally calls
         // `Receiver::blocking_recv` on the body-stream mpsc — and
-        // blocking_recv panics if invoked from an async runtime
-        // context. A plain std::thread with `rx.blocking_recv()` on
-        // the work channel keeps us outside of any runtime, so the
-        // downstream Python-side blocking_recv works correctly.
-        std::thread::Builder::new()
-            .name("pyronova-main-bridge".into())
-            .spawn(move || {
-                loop {
-                    // `mpsc::Receiver::blocking_recv()` is the non-
-                    // runtime-bound counterpart to `.recv().await`.
-                    // Returns None when all Senders drop (server
-                    // shutdown), which is our exit signal.
-                    let item = match rx.blocking_recv() {
-                        Some(i) => i,
-                        None => break,
-                    };
-                    dispatch_one(&routes_owned, item);
-                }
-                tracing::info!(
-                    target: "pyronova::server",
-                    "main-interp bridge thread exiting (channel closed)"
-                );
-            })
-            .expect("spawn main bridge thread");
+        // tokio's blocking_recv panics if invoked from an async runtime
+        // context. Plain std::threads with crossbeam recv() keep us
+        // outside of any runtime, so the downstream Python-side
+        // blocking_recv works correctly.
+        for i in 0..workers {
+            let rx = rx.clone();
+            let routes = Arc::clone(&routes);
+            std::thread::Builder::new()
+                .name(format!("pyronova-main-bridge-{i}"))
+                .spawn(move || {
+                    loop {
+                        // crossbeam recv: blocks until item or all
+                        // Senders drop. Disconnected → server shutdown
+                        // → worker exit.
+                        let item = match rx.recv() {
+                            Ok(i) => i,
+                            Err(_) => break,
+                        };
+                        dispatch_one(&routes, item);
+                    }
+                    tracing::info!(
+                        target: "pyronova::server",
+                        worker = i,
+                        "main-interp bridge worker exiting (channel closed)"
+                    );
+                })
+                .expect("spawn main bridge worker");
+        }
+
+        tracing::info!(
+            target: "pyronova::server",
+            workers,
+            capacity,
+            "main-interp bridge spawned"
+        );
 
         Arc::new(MainInterpBridge { tx })
     }
 
     /// Non-blocking dispatch. Returns Err with the original work item
     /// when the channel is full (caller should respond 503) or when
-    /// the bridge thread has exited (caller should respond 500).
+    /// all bridge workers have exited (caller should respond 500).
+    ///
+    /// `clippy::result_large_err`: the Err variant carries the unsent
+    /// `GilWorkItem` back so the caller can drain it / respond. Boxing
+    /// would only move bytes around; this is a cold path (only fires on
+    /// 503 / shutdown). Allowed deliberately.
+    #[allow(clippy::result_large_err)]
     pub(crate) fn try_dispatch(
         &self,
         item: GilWorkItem,
     ) -> Result<(), (GilWorkItem, TryDispatchError)> {
         match self.tx.try_send(item) {
             Ok(()) => Ok(()),
-            Err(mpsc::error::TrySendError::Full(item)) => {
-                Err((item, TryDispatchError::Full))
-            }
-            Err(mpsc::error::TrySendError::Closed(item)) => {
-                Err((item, TryDispatchError::Closed))
-            }
+            Err(cbc::TrySendError::Full(item)) => Err((item, TryDispatchError::Full)),
+            Err(cbc::TrySendError::Disconnected(item)) => Err((item, TryDispatchError::Closed)),
         }
     }
 }
