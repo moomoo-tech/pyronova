@@ -247,14 +247,20 @@ impl PyronovaApp {
         status_code: u16,
         headers: Option<std::collections::HashMap<String, String>>,
     ) -> PyResult<()> {
-        let key = (method.to_ascii_uppercase(), path.to_string());
+        let method_key = method.to_ascii_uppercase();
+        let path_key = path.to_string();
         let resp = crate::router::FastResponse {
             body: bytes::Bytes::from(body),
             content_type,
             status: status_code,
             headers: headers.unwrap_or_default(),
         };
-        self.routes.write().fast_responses.insert(key, resp);
+        self.routes
+            .write()
+            .fast_responses
+            .entry(method_key)
+            .or_default()
+            .insert(path_key, resp);
         Ok(())
     }
 
@@ -426,6 +432,7 @@ impl PyronovaApp {
         use std::sync::Once;
         static METRICS_INIT: Once = Once::new();
         METRICS_INIT.call_once(|| {
+            crate::monitor::init_metrics_flag();
             if std::env::var("PYRONOVA_METRICS").unwrap_or_default() == "1" {
                 crate::monitor::spawn_rss_sampler();
                 tracing::info!(target: "pyronova::server", "Metrics enabled (PYRONOVA_METRICS=1): passive GIL monitor + RSS sampler");
@@ -579,6 +586,38 @@ impl PyronovaApp {
         } else {
             self.run_gil(py, addr, io_workers, num_cpus, frozen, tls_acceptor)
         }
+    }
+
+    /// In-memory benchmark: spin up N TPC sub-interp workers, feed
+    /// them virtual connections via `tokio::io::duplex` (no TCP).
+    /// Bypasses the kernel network stack entirely — used to bound
+    /// the pure-framework ceiling (Hyper parse → routing → handler
+    /// → response build). Only supports sync, non-GIL, non-streaming
+    /// routes. Returns `(total_requests, elapsed_s)`.
+    #[pyo3(signature = (duration_s=10, workers=None, conns_per_worker=8))]
+    fn bench_inmem(
+        &self,
+        py: Python<'_>,
+        duration_s: u64,
+        workers: Option<usize>,
+        conns_per_worker: usize,
+    ) -> PyResult<(u64, f64)> {
+        self.__bench_inmem_impl(py, duration_s, workers, conns_per_worker)
+    }
+
+    /// Loopback bench: real TCP on 127.0.0.1, server + client in the
+    /// same process. Measures the framework ceiling with the kernel
+    /// network stack included, but zero external-client CPU
+    /// contention (unlike wrk). Returns (total_requests, elapsed_s, port).
+    #[pyo3(signature = (duration_s=10, workers=None, client_conns=32))]
+    fn bench_loopback(
+        &self,
+        py: Python<'_>,
+        duration_s: u64,
+        workers: Option<usize>,
+        client_conns: usize,
+    ) -> PyResult<(u64, f64, u16)> {
+        self.__bench_loopback_impl(py, duration_s, workers, client_conns)
     }
 }
 
@@ -1186,6 +1225,218 @@ impl PyronovaApp {
                 routes,
                 tls_acceptor,
                 main_bridge,
+            )
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        })
+    }
+
+    #[allow(dead_code)]
+    fn __bench_inmem_impl(
+        &self,
+        py: Python<'_>,
+        duration_s: u64,
+        workers: Option<usize>,
+        conns_per_worker: usize,
+    ) -> PyResult<(u64, f64)> {
+        let n_threads = workers.unwrap_or_else(crate::tpc::physical_core_count);
+
+        // Build N independent FrozenRoutes — one per TPC worker. Each
+        // gets its own Arc allocation so the refcount cacheline is
+        // exclusive to the worker's P-core. Removes the cross-core
+        // ping-pong from per-request Arc::clone(&routes) at the cost
+        // of N × Py handler IncRefs at startup (one-time).
+        let build_one = |py: Python<'_>| -> FrozenRoutes {
+            let table = self.routes.read();
+            Arc::new(RouteTable {
+                handlers: table.handlers.iter().map(|h| h.clone_ref(py)).collect(),
+                handler_names: table.handler_names.clone(),
+                requires_gil: table.requires_gil.clone(),
+                is_async: table.is_async.clone(),
+                is_stream: table.is_stream.clone(),
+                routers: table.routers.clone(),
+                ws_handlers: table
+                    .ws_handlers
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone_ref(py)))
+                    .collect(),
+                before_hooks: table.before_hooks.iter().map(|h| h.clone_ref(py)).collect(),
+                after_hooks: table.after_hooks.iter().map(|h| h.clone_ref(py)).collect(),
+                before_hook_names: table.before_hook_names.clone(),
+                after_hook_names: table.after_hook_names.clone(),
+                fallback_handler: table.fallback_handler.as_ref().map(|h| h.clone_ref(py)),
+                fallback_handler_name: table.fallback_handler_name.clone(),
+                static_dirs: table.static_dirs.clone(),
+                cors_config: self.cors_config.clone(),
+                request_logging: self.request_logging,
+                fast_responses: table.fast_responses.clone(),
+            })
+        };
+
+        // Route-shape validation uses one sample.
+        let sample = build_one(py);
+        if sample.requires_gil.iter().any(|&g| g) {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "bench_inmem does not support gil=True routes",
+            ));
+        }
+        if sample.is_async.iter().any(|&a| a) {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "bench_inmem does not support async def routes",
+            ));
+        }
+        if sample.is_stream.iter().any(|&s| s) {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "bench_inmem does not support stream=True routes",
+            ));
+        }
+        let handler_names_from_routes = sample.handler_names.clone();
+        let before_hook_names = sample.before_hook_names.clone();
+        let after_hook_names = sample.after_hook_names.clone();
+
+        let mut per_worker_routes: Vec<FrozenRoutes> = Vec::with_capacity(n_threads);
+        per_worker_routes.push(sample);
+        for _ in 1..n_threads {
+            per_worker_routes.push(build_one(py));
+        }
+
+        let script_path = if let Some(ref p) = self.script_path {
+            p.clone()
+        } else {
+            let main_mod = py.import("__main__")?;
+            main_mod.getattr("__file__")?.extract::<String>()?
+        };
+        let mut all_func_names: Vec<String> = handler_names_from_routes;
+        all_func_names.extend(before_hook_names.into_iter());
+        all_func_names.extend(after_hook_names.into_iter());
+
+        crate::monitor::init_metrics_flag();
+        std::env::set_var("PYRONOVA_WORKER", "1");
+        let raw_script = std::fs::read_to_string(&script_path).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "read script '{script_path}': {e}"
+            ))
+        })?;
+        let pool_id = interp::next_pool_id();
+        let mut built_workers = Vec::with_capacity(n_threads);
+        for i in 0..n_threads {
+            let w = unsafe {
+                interp::SubInterpreterWorker::new(
+                    &raw_script,
+                    &script_path,
+                    &all_func_names,
+                    pool_id,
+                )
+                .map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "bench_inmem sub-interp {i} init: {e}"
+                    ))
+                })?
+            };
+            built_workers.push(w);
+        }
+
+        py.detach(move || -> PyResult<(u64, f64)> {
+            crate::tpc::run_inmem_bench(
+                n_threads,
+                conns_per_worker,
+                duration_s,
+                built_workers,
+                per_worker_routes,
+                None,
+            )
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        })
+    }
+
+    #[allow(dead_code)]
+    fn __bench_loopback_impl(
+        &self,
+        py: Python<'_>,
+        duration_s: u64,
+        workers: Option<usize>,
+        client_conns: usize,
+    ) -> PyResult<(u64, f64, u16)> {
+        let routes: FrozenRoutes = {
+            let table = self.routes.read();
+            Arc::new(RouteTable {
+                handlers: table.handlers.iter().map(|h| h.clone_ref(py)).collect(),
+                handler_names: table.handler_names.clone(),
+                requires_gil: table.requires_gil.clone(),
+                is_async: table.is_async.clone(),
+                is_stream: table.is_stream.clone(),
+                routers: table.routers.clone(),
+                ws_handlers: table
+                    .ws_handlers
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone_ref(py)))
+                    .collect(),
+                before_hooks: table.before_hooks.iter().map(|h| h.clone_ref(py)).collect(),
+                after_hooks: table.after_hooks.iter().map(|h| h.clone_ref(py)).collect(),
+                before_hook_names: table.before_hook_names.clone(),
+                after_hook_names: table.after_hook_names.clone(),
+                fallback_handler: table.fallback_handler.as_ref().map(|h| h.clone_ref(py)),
+                fallback_handler_name: table.fallback_handler_name.clone(),
+                static_dirs: table.static_dirs.clone(),
+                cors_config: self.cors_config.clone(),
+                request_logging: self.request_logging,
+                fast_responses: table.fast_responses.clone(),
+            })
+        };
+
+        if routes.requires_gil.iter().any(|&g| g)
+            || routes.is_async.iter().any(|&a| a)
+            || routes.is_stream.iter().any(|&s| s)
+        {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "bench_loopback requires all routes to be sync, non-GIL, non-stream",
+            ));
+        }
+
+        let n_threads = workers.unwrap_or_else(crate::tpc::physical_core_count);
+        let script_path = if let Some(ref p) = self.script_path {
+            p.clone()
+        } else {
+            let main_mod = py.import("__main__")?;
+            main_mod.getattr("__file__")?.extract::<String>()?
+        };
+        let mut all_func_names: Vec<String> = routes.handler_names.clone();
+        all_func_names.extend(routes.before_hook_names.iter().cloned());
+        all_func_names.extend(routes.after_hook_names.iter().cloned());
+
+        crate::monitor::init_metrics_flag();
+        std::env::set_var("PYRONOVA_WORKER", "1");
+        let raw_script = std::fs::read_to_string(&script_path).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "read script '{script_path}': {e}"
+            ))
+        })?;
+        let pool_id = interp::next_pool_id();
+        let mut built_workers = Vec::with_capacity(n_threads);
+        for i in 0..n_threads {
+            let w = unsafe {
+                interp::SubInterpreterWorker::new(
+                    &raw_script,
+                    &script_path,
+                    &all_func_names,
+                    pool_id,
+                )
+                .map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "bench_loopback sub-interp {i} init: {e}"
+                    ))
+                })?
+            };
+            built_workers.push(w);
+        }
+
+        py.detach(move || -> PyResult<(u64, f64, u16)> {
+            crate::tpc::run_loopback_bench(
+                n_threads,
+                client_conns,
+                duration_s,
+                built_workers,
+                routes,
+                None,
             )
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)
         })

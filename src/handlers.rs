@@ -53,18 +53,18 @@ pub(crate) async fn handle_request_tpc_inline(
     if crate::grpc::is_grpc_request(&req) {
         return crate::grpc::handle_grpc(req).await;
     }
-    crate::monitor::TOTAL_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    crate::monitor::count_request();
     let start = std::time::Instant::now();
-    let method: Arc<str> = Arc::from(req.method().as_str());
-    let uri = req.uri().clone();
-    let path: Arc<str> = Arc::from(uri.path());
-    let query = uri.query().unwrap_or("").to_string();
 
-    // Fast-path: pre-built response. Zero Python, served from Rust.
+    // Fast-path: pre-built response. Zero Python, zero allocation.
+    // Borrows method/path directly from hyper's request — no Arc::from,
+    // no uri.clone, no String allocations. Nested map lookup uses
+    // `String: Borrow<str>` so both levels accept `&str` directly.
     if !routes.fast_responses.is_empty() {
         if let Some(fr) = routes
             .fast_responses
-            .get(&(method.to_string(), path.to_string()))
+            .get(req.method().as_str())
+            .and_then(|m| m.get(req.uri().path()))
         {
             return Ok(full_body(build_fast_response(
                 fr,
@@ -72,6 +72,14 @@ pub(crate) async fn handle_request_tpc_inline(
             )));
         }
     }
+
+    // Python path: we now need owning strings for downstream dispatch
+    // (call_handler signature, logging, method/path passed by value
+    // into PyronovaRequest). Allocation is unavoidable here.
+    let method: Arc<str> = Arc::from(req.method().as_str());
+    let uri = req.uri().clone();
+    let path: Arc<str> = Arc::from(uri.path());
+    let query = uri.query().unwrap_or("").to_string();
 
     let raw_headers = req.headers().clone();
     let accept_encoding = raw_headers
@@ -116,8 +124,6 @@ pub(crate) async fn handle_request_tpc_inline(
     };
 
     let headers = extract_headers(&raw_headers);
-    let method_log = Arc::clone(&method);
-    let path_log = Arc::clone(&path);
 
     // ── Phase 3: gil=True route → main-interp bridge ──────────────────
     // If the matched route is registered with gil=True (C-extension /
@@ -207,8 +213,8 @@ pub(crate) async fn handle_request_tpc_inline(
         if routes.request_logging {
             tracing::info!(
                 target: "pyronova::access",
-                method = %method_log,
-                path = %path_log,
+                method = %method,
+                path = %path,
                 status,
                 latency_us,
                 mode = "tpc-gil-bridge",
@@ -218,7 +224,7 @@ pub(crate) async fn handle_request_tpc_inline(
         return Ok(http_resp);
     }
 
-    let handler_name = routes.handler_names[handler_idx].clone();
+    // &routes.handler_names[idx] lives long enough — call_handler is sync.
 
     // The inline dispatch: acquire the TPC thread's sub-interp GIL,
     // run the handler, release. Blocks the thread (which is the point —
@@ -231,7 +237,7 @@ pub(crate) async fn handle_request_tpc_inline(
             let _guard =
                 interp::SubInterpGilGuard::acquire(tstate_cell.get(), &tstate_cell);
             worker_ref.call_handler(
-                &handler_name,
+                &routes.handler_names[handler_idx],
                 &routes.before_hook_names,
                 &routes.after_hook_names,
                 &method,
@@ -289,8 +295,8 @@ pub(crate) async fn handle_request_tpc_inline(
     if routes.request_logging {
         tracing::info!(
             target: "pyronova::access",
-            method = %method_log,
-            path = %path_log,
+            method = %method,
+            path = %path,
             status,
             latency_us,
             mode = "tpc-inline",
@@ -590,28 +596,16 @@ pub(crate) async fn handle_request(
     if crate::grpc::is_grpc_request(&req) {
         return crate::grpc::handle_grpc(req).await;
     }
-    crate::monitor::TOTAL_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    crate::monitor::count_request();
     let start = std::time::Instant::now();
-    let method: Arc<str> = Arc::from(req.method().as_str());
-    let uri = req.uri().clone();
-    let path: Arc<str> = Arc::from(uri.path());
-    let query = uri.query().unwrap_or("").to_string();
 
-    // Fast-path: pre-built response registered via app.add_fast_response().
-    // Served entirely from Rust — no Python call, no GIL wait, no body read.
-    // Checked before headers/body because for fast routes none of that
-    // matters; we have the exact bytes + status + content-type already.
-    //
-    // The `is_empty()` guard is load-bearing: the lookup builds two
-    // `String` allocations for the hashmap key (method + path), which
-    // at 500k rps is 1M malloc/s of pure waste for apps that don't
-    // register any fast routes. Skip the allocs entirely when there
-    // are no fast responses to match against — the `.is_empty()` check
-    // is a single pointer compare.
+    // Fast-path: zero-alloc lookup. Borrows method/path from hyper
+    // directly; the nested map accepts `&str` via `String: Borrow<str>`.
     if !routes.fast_responses.is_empty() {
         if let Some(fr) = routes
             .fast_responses
-            .get(&(method.to_string(), path.to_string()))
+            .get(req.method().as_str())
+            .and_then(|m| m.get(req.uri().path()))
         {
             return Ok(full_body(build_fast_response(
                 fr,
@@ -619,6 +613,11 @@ pub(crate) async fn handle_request(
             )));
         }
     }
+
+    let method: Arc<str> = Arc::from(req.method().as_str());
+    let uri = req.uri().clone();
+    let path: Arc<str> = Arc::from(uri.path());
+    let query = uri.query().unwrap_or("").to_string();
 
     // Lazy headers: store raw HeaderMap, convert only if Python accesses req.headers.
     let raw_headers = req.headers().clone();
@@ -960,20 +959,15 @@ pub(crate) async fn handle_request_subinterp(
     if crate::grpc::is_grpc_request(&req) {
         return crate::grpc::handle_grpc(req).await;
     }
-    crate::monitor::TOTAL_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    crate::monitor::count_request();
     let start = std::time::Instant::now();
-    let method: Arc<str> = Arc::from(req.method().as_str());
-    let uri = req.uri().clone();
-    let path: Arc<str> = Arc::from(uri.path());
-    let query = uri.query().unwrap_or("").to_string();
 
-    // Fast-path: pre-built response registered via app.add_fast_response().
-    // Same short-circuit as handle_request, same is_empty() guard to keep
-    // apps without fast routes from paying for the String allocations.
+    // Fast-path: zero-alloc lookup (see handle_request).
     if !routes.fast_responses.is_empty() {
         if let Some(fr) = routes
             .fast_responses
-            .get(&(method.to_string(), path.to_string()))
+            .get(req.method().as_str())
+            .and_then(|m| m.get(req.uri().path()))
         {
             return Ok(full_body(build_fast_response(
                 fr,
@@ -981,6 +975,11 @@ pub(crate) async fn handle_request_subinterp(
             )));
         }
     }
+
+    let method: Arc<str> = Arc::from(req.method().as_str());
+    let uri = req.uri().clone();
+    let path: Arc<str> = Arc::from(uri.path());
+    let query = uri.query().unwrap_or("").to_string();
 
     // Defer header extraction — only convert if needed (sub-interp path).
     let raw_headers = req.headers().clone();

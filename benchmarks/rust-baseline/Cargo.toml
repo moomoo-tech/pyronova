@@ -41,6 +41,10 @@ path = "src/actix_compressed_tuned.rs"
 name = "bench-actix-tls"
 path = "src/actix_tls.rs"
 
+[[bin]]
+name = "load-gen"
+path = "src/load_gen.rs"
+
 [profile.release]
 lto = "fat"
 codegen-units = 1

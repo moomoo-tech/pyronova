@@ -52,6 +52,41 @@ pub static DROPPED_REQUESTS: CachePadded<AtomicU64> = CachePadded::new(AtomicU64
 /// Total requests processed
 pub static TOTAL_REQUESTS: CachePadded<AtomicU64> = CachePadded::new(AtomicU64::new(0));
 
+/// Master kill-switch for hot-path metrics. Read once at startup from
+/// `PYRONOVA_METRICS` (same env var that gates the RSS sampler). When
+/// false, per-request `fetch_add` on TOTAL_REQUESTS is skipped — a
+/// cache-line that was being ping-ponged across every core on every
+/// request goes cold, reclaiming the last cross-core atomic in the
+/// TPC inline hot path. Users running in production with metrics
+/// dashboards flip PYRONOVA_METRICS=1 and pay the ~30ns/req back.
+static METRICS_ENABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Initialize the metrics kill-switch. Called once at app.run() startup.
+/// Idempotent.
+pub fn init_metrics_flag() {
+    let on = std::env::var("PYRONOVA_METRICS").unwrap_or_default() == "1";
+    METRICS_ENABLED.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether hot-path metrics (TOTAL_REQUESTS etc.) should be recorded.
+/// Branch-predicted false in the default path — a no-op after the
+/// first iteration of the JIT trace.
+#[inline(always)]
+pub fn metrics_enabled() -> bool {
+    METRICS_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Increment TOTAL_REQUESTS iff metrics are enabled. Preferred over
+/// `TOTAL_REQUESTS.fetch_add` at hot-path call sites — the default-off
+/// branch completely skips the cross-core atomic.
+#[inline(always)]
+pub fn count_request() {
+    if metrics_enabled() {
+        TOTAL_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Passive GIL measurement (called from handlers.rs)
 // ---------------------------------------------------------------------------

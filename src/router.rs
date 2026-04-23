@@ -51,10 +51,12 @@ pub(crate) struct RouteTable {
     pub(crate) cors_config: Option<CorsConfig>,
     pub(crate) request_logging: bool,
     /// Exact-match (METHOD, path) → pre-built response, served from
-    /// the accept loop before any Python dispatch. HashMap because we
-    /// want O(1) lookup; the key is `(uppercase_method, path)` to match
-    /// the canonical form hyper gives us.
-    pub(crate) fast_responses: HashMap<(String, String), FastResponse>,
+    /// the accept loop before any Python dispatch. Nested map keyed
+    /// by method then path so the lookup accepts `&str` directly via
+    /// the `Borrow<str>` impl on `String` — zero allocation on the
+    /// hot path. At 2M+ req/s the old `(method.to_string(), path.to_string())`
+    /// key cost two heap allocations per request.
+    pub(crate) fast_responses: HashMap<String, HashMap<String, FastResponse>>,
 }
 
 impl RouteTable {

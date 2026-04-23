@@ -67,6 +67,37 @@ fn try_pin_current(core_id: Option<core_affinity::CoreId>) {
     }
 }
 
+/// macOS-only: bump the calling thread's QoS class to
+/// USER_INTERACTIVE. core_affinity::set_for_current is a silent
+/// no-op on Darwin (no public CPU-pinning API), so without this
+/// the scheduler is free to park TPC threads on E-cores for
+/// power savings — fatal under TPC because there is no work-
+/// stealing across threads. USER_INTERACTIVE tells the scheduler
+/// to keep us on P-cores and ignore power hints, at the cost of
+/// giving up energy-efficiency on idle machines. Acceptable
+/// tradeoff for a throughput-first server.
+#[cfg(target_os = "macos")]
+fn elevate_thread_qos_macos() {
+    use std::os::raw::c_int;
+    // Opaque qos_class_t. 0x21 == QOS_CLASS_USER_INTERACTIVE per
+    // <sys/qos.h>. Keeping the constant inline avoids pulling in
+    // the whole qos.h shim; the value has been stable since 10.10.
+    const QOS_CLASS_USER_INTERACTIVE: c_int = 0x21;
+    extern "C" {
+        fn pthread_set_qos_class_self_np(
+            qos_class: c_int,
+            relative_priority: c_int,
+        ) -> c_int;
+    }
+    unsafe {
+        pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[inline(always)]
+fn elevate_thread_qos_macos() {}
+
 /// Log line emitted once on startup so operators can see the TPC topology.
 fn log_startup(mode: &str, addr: &SocketAddr, n_threads: usize, n_cpus: usize) {
     tracing::info!(
@@ -131,6 +162,7 @@ pub(crate) fn run_tpc_gil(
             .name(format!("pyronova-tpc-{i}"))
             .spawn(move || {
                 try_pin_current(core_id);
+                elevate_thread_qos_macos();
                 let rt = RuntimeBuilder::new_current_thread()
                     .enable_all()
                     .build()
@@ -284,6 +316,66 @@ pub(crate) fn run_tpc_subinterp(
             workers.len()
         ));
     }
+
+    // Darwin: kqueue-backed SO_REUSEPORT routes ~all traffic to one
+    // listener (last-socket-wins). We keep the per-thread-listener
+    // default anyway because localhost benchmarking shows it still
+    // wins: fanout's cross-thread wake cost + client/server CPU
+    // contention on a single machine outweighs the distribution
+    // benefit. The fanout topology stays behind an env opt-in for
+    // real-NIC testing and hardware where the loopback isn't the
+    // bottleneck. Set `PYRONOVA_TPC_DARWIN=fanout` to opt in.
+    #[cfg(target_os = "macos")]
+    {
+        let use_fanout = matches!(
+            std::env::var("PYRONOVA_TPC_DARWIN").ok().as_deref(),
+            Some("fanout")
+        );
+        if use_fanout {
+            return run_tpc_subinterp_fanout(
+                addr,
+                n_threads,
+                n_cpus,
+                workers,
+                routes,
+                tls_acceptor,
+                main_bridge,
+            );
+        }
+        return run_tpc_subinterp_per_thread_listener(
+            addr,
+            n_threads,
+            n_cpus,
+            &mut workers,
+            routes,
+            tls_acceptor,
+            main_bridge,
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        run_tpc_subinterp_per_thread_listener(
+            addr,
+            n_threads,
+            n_cpus,
+            &mut workers,
+            routes,
+            tls_acceptor,
+            main_bridge,
+        )
+    }
+}
+
+fn run_tpc_subinterp_per_thread_listener(
+    addr: SocketAddr,
+    n_threads: usize,
+    n_cpus: usize,
+    workers: &mut Vec<SubInterpreterWorker>,
+    routes: FrozenRoutes,
+    tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
+    main_bridge: Option<Arc<crate::main_bridge::MainInterpBridge>>,
+) -> Result<(), String> {
     log_startup("hybrid-inline", &addr, n_threads, n_cpus);
 
     let shutdown = CancellationToken::new();
@@ -317,6 +409,7 @@ pub(crate) fn run_tpc_subinterp(
             .name(format!("pyronova-tpc-{i}"))
             .spawn(move || {
                 try_pin_current(core_id);
+                elevate_thread_qos_macos();
                 let rt = RuntimeBuilder::new_current_thread()
                     .enable_all()
                     .build()
@@ -342,6 +435,242 @@ pub(crate) fn run_tpc_subinterp(
         let _ = h.join();
     }
     Ok(())
+}
+
+/// Darwin-only TPC topology: one accept thread feeds N worker threads
+/// through per-worker unbounded mpsc queues, round-robin. Preserves the
+/// current-thread runtime + LocalSet + sub-interp-per-worker model; the
+/// only change is where the TcpStream comes from. Pays one cross-thread
+/// wake per TCP connection, which is amortized to ~0 under HTTP keep-
+/// alive (one wake serves the connection's full request lifetime).
+#[cfg(target_os = "macos")]
+fn run_tpc_subinterp_fanout(
+    addr: SocketAddr,
+    n_threads: usize,
+    n_cpus: usize,
+    mut workers: Vec<SubInterpreterWorker>,
+    routes: FrozenRoutes,
+    tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
+    main_bridge: Option<Arc<crate::main_bridge::MainInterpBridge>>,
+) -> Result<(), String> {
+    log_startup("hybrid-inline-fanout", &addr, n_threads, n_cpus);
+
+    let shutdown = CancellationToken::new();
+    let core_ids = core_affinity::get_core_ids().unwrap_or_default();
+
+    let sigint_token = shutdown.clone();
+    std::thread::spawn(move || {
+        let rt = RuntimeBuilder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("sigint runtime");
+        rt.block_on(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            tracing::info!(target: "pyronova::server", "Shutting down gracefully...");
+            println!("\n  Shutting down gracefully...");
+            crate::monitor::stop_rss_sampler();
+            sigint_token.cancel();
+        });
+    });
+
+    type Conn = (std::net::TcpStream, SocketAddr);
+
+    // Bounded per-worker inbox. Capacity is a load-shedding threshold:
+    // when a worker falls behind and its inbox fills, the acceptor
+    // drops new connections (TCP RST to the client) rather than
+    // hoarding file descriptors or queuing unbounded backlog. 1024
+    // gives ample slack for burst smoothing while keeping worst-case
+    // FD usage bounded at n_threads * 1024.
+    const WORKER_INBOX_CAP: usize = 1024;
+
+    let mut worker_txs: Vec<tokio::sync::mpsc::Sender<Conn>> = Vec::with_capacity(n_threads);
+    let mut worker_rxs: Vec<Option<tokio::sync::mpsc::Receiver<Conn>>> =
+        Vec::with_capacity(n_threads);
+    for _ in 0..n_threads {
+        let (tx, rx) = tokio::sync::mpsc::channel(WORKER_INBOX_CAP);
+        worker_txs.push(tx);
+        worker_rxs.push(Some(rx));
+    }
+
+    let mut handles = Vec::with_capacity(n_threads + 1);
+
+    for i in 0..n_threads {
+        let core_id = core_ids.get(i).copied();
+        let worker = workers.remove(0);
+        let routes = Arc::clone(&routes);
+        let shutdown_w = shutdown.clone();
+        let tls = tls_acceptor.clone();
+        let bridge = main_bridge.clone();
+        let rx = worker_rxs[i]
+            .take()
+            .expect("worker_rxs slot must be populated");
+
+        let handle = std::thread::Builder::new()
+            .name(format!("pyronova-tpc-{i}"))
+            .spawn(move || {
+                try_pin_current(core_id);
+                elevate_thread_qos_macos();
+                let rt = RuntimeBuilder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("tpc current-thread runtime build");
+                let local = LocalSet::new();
+                let mut worker = worker;
+                worker.tstate =
+                    unsafe { crate::interp::rebind_tstate_to_current_thread(worker.tstate) };
+                let worker = std::rc::Rc::new(std::cell::RefCell::new(worker));
+                local.block_on(&rt, async move {
+                    tpc_worker_loop_fanout(rx, worker, routes, shutdown_w, tls, bridge).await;
+                });
+            })
+            .map_err(|e| format!("spawn tpc-{i}: {e}"))?;
+        handles.push(handle);
+    }
+
+    // Acceptor thread — dedicated OS thread with its own current_thread
+    // runtime so accept() polling doesn't contend with any worker.
+    let shutdown_a = shutdown.clone();
+    let acceptor = std::thread::Builder::new()
+        .name("pyronova-acceptor".into())
+        .spawn(move || {
+            // Pin the acceptor to the last P-core if available — keeps
+            // it off the cores handling handlers so TCP softirq-style
+            // work doesn't fight for the same L1/L2 as handler execution.
+            if !core_ids.is_empty() {
+                try_pin_current(core_ids.get(n_threads % core_ids.len().max(1)).copied());
+            }
+            elevate_thread_qos_macos();
+            let rt = RuntimeBuilder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("acceptor runtime");
+            rt.block_on(async move {
+                let std_listener = match crate::app::create_reuseport_listener(addr) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        tracing::error!(target: "pyronova::server", error = %e, "TPC fanout listener failed");
+                        return;
+                    }
+                };
+                let listener = match TcpListener::from_std(std_listener) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        tracing::error!(target: "pyronova::server", error = %e, "TPC fanout TcpListener::from_std failed");
+                        return;
+                    }
+                };
+                let mut next: usize = 0;
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = shutdown_a.cancelled() => break,
+                        res = listener.accept() => match res {
+                            Ok((stream, remote_addr)) => {
+                                let _ = stream.set_nodelay(true);
+                                setup_tcp_quickack(&stream);
+                                let std_stream = match stream.into_std() {
+                                    Ok(s) => s,
+                                    Err(e) => {
+                                        tracing::warn!(target: "pyronova::server", error = %e, "into_std failed");
+                                        continue;
+                                    }
+                                };
+                                // TcpStream::from_std requires nonblocking.
+                                if std_stream.set_nonblocking(true).is_err() {
+                                    continue;
+                                }
+                                // Round-robin. try_send with load shedding:
+                                // if the chosen worker's inbox is full, drop
+                                // the connection (kernel sends RST). Sheds
+                                // cleanly under overload instead of hoarding
+                                // FDs or spawning unbounded pending work.
+                                // See WORKER_INBOX_CAP comment above.
+                                use tokio::sync::mpsc::error::TrySendError;
+                                match worker_txs[next].try_send((std_stream, remote_addr)) {
+                                    Ok(()) => {}
+                                    Err(TrySendError::Full(_)) => {
+                                        tracing::warn!(
+                                            target: "pyronova::server",
+                                            worker = next,
+                                            "TPC worker inbox full — dropping connection (load shed)"
+                                        );
+                                    }
+                                    Err(TrySendError::Closed(_)) => {
+                                        // Worker gone — shutdown in progress.
+                                        break;
+                                    }
+                                }
+                                next += 1;
+                                if next >= worker_txs.len() {
+                                    next = 0;
+                                }
+                            }
+                            Err(e) => crate::app::handle_accept_error(&e).await,
+                        }
+                    }
+                }
+                // Dropping worker_txs here hangs up every receiver,
+                // giving workers a clean exit signal alongside the
+                // shutdown token.
+                drop(worker_txs);
+            });
+        })
+        .map_err(|e| format!("spawn acceptor: {e}"))?;
+    handles.push(acceptor);
+
+    for h in handles {
+        let _ = h.join();
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+async fn tpc_worker_loop_fanout(
+    mut rx: tokio::sync::mpsc::Receiver<(std::net::TcpStream, SocketAddr)>,
+    worker: std::rc::Rc<std::cell::RefCell<SubInterpreterWorker>>,
+    routes: FrozenRoutes,
+    shutdown: CancellationToken,
+    tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
+    main_bridge: Option<Arc<crate::main_bridge::MainInterpBridge>>,
+) {
+    // Fanout path supports the Count GC mode only. Idle mode's drained-
+    // queue signal lives in the acceptor now, not the worker, and the
+    // count-based trigger inside call_handler covers the common case.
+    // Off mode still silences the trigger.
+    let gc_mode = gc_mode_from_env();
+    if matches!(gc_mode, GcMode::Off) {
+        worker.borrow_mut().gc_threshold = 0;
+    }
+
+    let tracker = TaskTracker::new();
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => break,
+            maybe = rx.recv() => match maybe {
+                Some((std_stream, remote_addr)) => {
+                    let stream = match tokio::net::TcpStream::from_std(std_stream) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::warn!(target: "pyronova::server", error = %e, "TcpStream::from_std failed");
+                            continue;
+                        }
+                    };
+                    let worker_clone = std::rc::Rc::clone(&worker);
+                    let routes = Arc::clone(&routes);
+                    let conn_token = shutdown.clone();
+                    let tls_acc_c = tls_acceptor.clone();
+                    let bridge_c = main_bridge.clone();
+                    tracker.spawn_local(async move {
+                        drive_inline_conn(stream, remote_addr, worker_clone, routes, conn_token, tls_acc_c, bridge_c).await;
+                    });
+                }
+                None => break,
+            }
+        }
+    }
+    tracker.close();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), tracker.wait()).await;
 }
 
 /// GC scheduling mode. Read once at startup from `PYRONOVA_GC_MODE`:
@@ -608,10 +937,22 @@ async fn drive_inline_conn(
 /// Env-var gate for Phase 1. The Python-side `app.run(tpc=True)` kwarg
 /// goes through a different path in `PyronovaApp` and does not consult
 /// this function.
-/// Count physical CPU cores (not logical hyperthreads). Parses
-/// /sys/devices/system/cpu/cpu*/topology/thread_siblings_list — the
-/// number of unique sibling groups equals the physical core count.
-/// Falls back to logical core count if topology is unavailable.
+/// Count physical CPU cores to size the TPC pool.
+///
+/// Linux: parses /sys/devices/system/cpu/cpu*/topology/thread_siblings_list —
+/// the number of unique sibling groups equals the physical core count,
+/// stripping SMT.
+///
+/// macOS: queries `hw.perflevel0.physicalcpu` via sysctl. On Apple
+/// Silicon perflevel0 is the performance-core cluster; the efficiency
+/// cores at perflevel1 are deliberately excluded. Running a TPC
+/// thread on an E-core tanks single-connection throughput to ~1/3,
+/// and with no work-stealing that request is stuck — so the whole
+/// tail latency collapses. Sizing to P-core count keeps every TPC
+/// thread on a fast cluster.
+///
+/// Other platforms: falls back to logical core count.
+#[cfg(target_os = "linux")]
 pub(crate) fn physical_core_count() -> usize {
     use std::collections::HashSet;
     use std::fs;
@@ -641,6 +982,501 @@ pub(crate) fn physical_core_count() -> usize {
     } else {
         sibling_groups.len()
     }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn physical_core_count() -> usize {
+    use std::ffi::CString;
+    use std::ptr;
+    let name = CString::new("hw.perflevel0.physicalcpu").unwrap();
+    let mut count: i32 = 0;
+    let mut size = std::mem::size_of::<i32>();
+    let rc = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            &mut count as *mut _ as *mut libc::c_void,
+            &mut size,
+            ptr::null_mut(),
+            0,
+        )
+    };
+    if rc == 0 && count > 0 {
+        return count as usize;
+    }
+    // Pre-Apple-Silicon macOS (no perf levels) or older kernels:
+    // fall back to logical count.
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn physical_core_count() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+}
+
+// ---------------------------------------------------------------------------
+// In-memory benchmark mode (no TCP at all)
+// ---------------------------------------------------------------------------
+//
+// Exercises the full per-request pipeline (Hyper parse → routing →
+// Python handler call → response build → Hyper write) with zero
+// network cost. Each virtual connection is a `tokio::io::duplex` pair:
+// one end fed into the same hyper connection driver used by real
+// traffic, other end fed by a tight pipelined request generator.
+// Both ends run on the same per-worker LocalSet, so there are no
+// cross-thread wakes — pure in-core throughput.
+//
+// Used to bound the theoretical ceiling of the framework. Numbers
+// here are strictly above any TCP benchmark: no kernel socket, no
+// loopback copy, no syscall, no client-side contention.
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+const INMEM_REQ: &[u8] =
+    b"GET / HTTP/1.1\r\nHost: inmem\r\nConnection: keep-alive\r\n\r\n";
+const INMEM_BATCH: usize = 32;
+
+pub(crate) fn run_inmem_bench(
+    n_threads: usize,
+    conns_per_worker: usize,
+    duration_s: u64,
+    mut workers: Vec<SubInterpreterWorker>,
+    mut per_worker_routes: Vec<FrozenRoutes>,
+    main_bridge: Option<Arc<crate::main_bridge::MainInterpBridge>>,
+) -> Result<(u64, f64), String> {
+    if workers.len() != n_threads {
+        return Err(format!(
+            "inmem bench worker count mismatch: expected {n_threads}, got {}",
+            workers.len()
+        ));
+    }
+    if per_worker_routes.len() != n_threads {
+        return Err(format!(
+            "inmem bench routes count mismatch: expected {n_threads}, got {}",
+            per_worker_routes.len()
+        ));
+    }
+
+    println!(
+        "\n  Pyronova v{} [in-memory bench] — {n_threads} workers × {conns_per_worker} virtual conns, {duration_s}s",
+        env!("CARGO_PKG_VERSION")
+    );
+
+    let shutdown = CancellationToken::new();
+    let total = Arc::new(AtomicU64::new(0));
+    let core_ids = core_affinity::get_core_ids().unwrap_or_default();
+
+    let mut handles = Vec::with_capacity(n_threads);
+    for i in 0..n_threads {
+        let core_id = core_ids.get(i).copied();
+        let worker = workers.remove(0);
+        // Per-worker Arc instance — refcount cacheline is exclusive to
+        // this thread, eliminating cross-core ping-pong on per-request
+        // Arc::clone(&routes) inside service_fn.
+        let routes = per_worker_routes.remove(0);
+        let shutdown = shutdown.clone();
+        let bridge = main_bridge.clone();
+        let total = Arc::clone(&total);
+
+        let handle = std::thread::Builder::new()
+            .name(format!("pyronova-inmem-{i}"))
+            .spawn(move || {
+                try_pin_current(core_id);
+                elevate_thread_qos_macos();
+                let rt = RuntimeBuilder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("inmem runtime build");
+                let local = LocalSet::new();
+                let mut worker = worker;
+                worker.tstate = unsafe {
+                    crate::interp::rebind_tstate_to_current_thread(worker.tstate)
+                };
+                let worker = std::rc::Rc::new(std::cell::RefCell::new(worker));
+                local.block_on(&rt, async move {
+                    // Spawn K virtual connections on this worker's LocalSet.
+                    for _ in 0..conns_per_worker {
+                        let (server_half, client_half) = tokio::io::duplex(64 * 1024);
+                        let worker_c = std::rc::Rc::clone(&worker);
+                        let routes_c = Arc::clone(&routes);
+                        let shutdown_c = shutdown.clone();
+                        let bridge_c = bridge.clone();
+                        tokio::task::spawn_local(async move {
+                            drive_inmem_conn(
+                                server_half,
+                                worker_c,
+                                routes_c,
+                                shutdown_c,
+                                bridge_c,
+                            )
+                            .await;
+                        });
+                        let total_c = Arc::clone(&total);
+                        let shutdown_c = shutdown.clone();
+                        tokio::task::spawn_local(async move {
+                            inmem_generator(client_half, total_c, shutdown_c).await;
+                        });
+                    }
+                    shutdown.cancelled().await;
+                });
+            })
+            .map_err(|e| format!("spawn inmem-{i}: {e}"))?;
+        handles.push(handle);
+    }
+
+    // Warmup then measure.
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    let start = total.load(Ordering::Relaxed);
+    let t0 = std::time::Instant::now();
+    std::thread::sleep(std::time::Duration::from_secs(duration_s));
+    let end = total.load(Ordering::Relaxed);
+    let elapsed = t0.elapsed().as_secs_f64();
+    shutdown.cancel();
+
+    for h in handles {
+        let _ = h.join();
+    }
+    Ok((end - start, elapsed))
+}
+
+async fn drive_inmem_conn(
+    stream: tokio::io::DuplexStream,
+    worker: std::rc::Rc<std::cell::RefCell<SubInterpreterWorker>>,
+    routes: FrozenRoutes,
+    conn_token: CancellationToken,
+    main_bridge: Option<Arc<crate::main_bridge::MainInterpBridge>>,
+) {
+    let remote_addr: std::net::IpAddr = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+    let io = TokioIo::new(stream);
+    let svc = service_fn(move |req: Request<Incoming>| {
+        let worker = std::rc::Rc::clone(&worker);
+        let routes = Arc::clone(&routes);
+        let bridge = main_bridge.clone();
+        async move {
+            handle_request_tpc_inline(req, routes, worker, remote_addr, bridge).await
+        }
+    });
+    let mut builder = AutoBuilder::new(LocalExec);
+    builder
+        .http1()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(std::time::Duration::from_secs(10));
+    let conn = builder.serve_connection(io, svc);
+    tokio::pin!(conn);
+    loop {
+        tokio::select! {
+            res = conn.as_mut() => {
+                let _ = res;
+                break;
+            }
+            _ = conn_token.cancelled() => {
+                conn.as_mut().graceful_shutdown();
+            }
+        }
+    }
+}
+
+async fn inmem_generator(
+    mut stream: tokio::io::DuplexStream,
+    counter: Arc<AtomicU64>,
+    shutdown: CancellationToken,
+) {
+    // Probe: one request, parse Content-Length, compute response size.
+    if stream.write_all(INMEM_REQ).await.is_err() {
+        return;
+    }
+    let mut buf = vec![0u8; 4096];
+    let mut filled = 0usize;
+    let resp_size = loop {
+        let n = match stream.read(&mut buf[filled..]).await {
+            Ok(n) => n,
+            Err(_) => return,
+        };
+        if n == 0 {
+            return;
+        }
+        filled += n;
+        let data = &buf[..filled];
+        if let Some(hdr_end) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+            let mut content_len: Option<usize> = None;
+            for line in data[..hdr_end].split(|&b| b == b'\n') {
+                let line = line.strip_suffix(b"\r").unwrap_or(line);
+                if let Some(i) = line.iter().position(|&b| b == b':') {
+                    let (k, v) = (&line[..i], &line[i + 1..]);
+                    if k.eq_ignore_ascii_case(b"content-length") {
+                        if let Ok(s) = std::str::from_utf8(v) {
+                            if let Ok(parsed) = s.trim().parse::<usize>() {
+                                content_len = Some(parsed);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            let body_len = match content_len {
+                Some(n) => n,
+                None => return,
+            };
+            let total = hdr_end + 4 + body_len;
+            if buf.len() < total {
+                buf.resize(total + 128, 0);
+            }
+            while filled < total {
+                let n = match stream.read(&mut buf[filled..]).await {
+                    Ok(n) => n,
+                    Err(_) => return,
+                };
+                if n == 0 {
+                    return;
+                }
+                filled += n;
+            }
+            break total;
+        }
+        if filled == buf.len() {
+            buf.resize(filled * 2, 0);
+        }
+    };
+    counter.fetch_add(1, Ordering::Relaxed);
+
+    // Steady-state: pipeline BATCH requests, read exactly BATCH responses
+    // worth of bytes. Every response is byte-identical at this route, so
+    // counting bytes is sound.
+    let mut batch = Vec::with_capacity(INMEM_REQ.len() * INMEM_BATCH);
+    for _ in 0..INMEM_BATCH {
+        batch.extend_from_slice(INMEM_REQ);
+    }
+    let need = resp_size * INMEM_BATCH;
+    let mut rbuf = vec![0u8; need.max(8192)];
+
+    while !shutdown.is_cancelled() {
+        if stream.write_all(&batch).await.is_err() {
+            break;
+        }
+        let mut got = 0usize;
+        while got < need {
+            let n = match stream.read(&mut rbuf[..]).await {
+                Ok(n) => n,
+                Err(_) => return,
+            };
+            if n == 0 {
+                return;
+            }
+            got += n;
+        }
+        counter.fetch_add(INMEM_BATCH as u64, Ordering::Relaxed);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Loopback benchmark mode (real TCP, in-process client)
+// ---------------------------------------------------------------------------
+//
+// Like run_inmem_bench but with the full TCP stack: server binds a
+// real `SO_REUSEPORT` listener, client tasks open real TCP
+// connections to 127.0.0.1, pipelined GETs flow through the kernel
+// loopback path. Client runs in the same process on its own tokio
+// runtime, so there is zero external-process contention (unlike wrk).
+//
+// The gap between run_inmem_bench and this measures the kernel/
+// loopback cost: syscall + TCP state + loopback copy + kqueue/epoll
+// notification.
+
+pub(crate) fn run_loopback_bench(
+    n_threads: usize,
+    client_conns: usize,
+    duration_s: u64,
+    mut workers: Vec<SubInterpreterWorker>,
+    routes: FrozenRoutes,
+    main_bridge: Option<Arc<crate::main_bridge::MainInterpBridge>>,
+) -> Result<(u64, f64, u16), String> {
+    if workers.len() != n_threads {
+        return Err(format!(
+            "loopback bench worker count mismatch: expected {n_threads}, got {}",
+            workers.len()
+        ));
+    }
+
+    // Bind an ephemeral port on the main thread so we can report it
+    // back to the client before server threads start accepting. Using
+    // SO_REUSEPORT on this probe socket means the TPC worker threads
+    // can bind the same port without EADDRINUSE.
+    let probe = crate::app::create_reuseport_listener("127.0.0.1:0".parse().unwrap())?;
+    let port = probe
+        .local_addr()
+        .map_err(|e| format!("local_addr: {e}"))?
+        .port();
+    drop(probe);
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+
+    println!(
+        "\n  Pyronova v{} [loopback bench] — {n_threads} workers, {client_conns} client conns, port {port}, {duration_s}s",
+        env!("CARGO_PKG_VERSION")
+    );
+
+    let shutdown = CancellationToken::new();
+    let total = Arc::new(AtomicU64::new(0));
+    let core_ids = core_affinity::get_core_ids().unwrap_or_default();
+
+    // --- Server threads (mirrors run_tpc_subinterp_per_thread_listener) ---
+    let mut handles = Vec::with_capacity(n_threads + 1);
+    for i in 0..n_threads {
+        let core_id = core_ids.get(i).copied();
+        let worker = workers.remove(0);
+        let routes_c = Arc::clone(&routes);
+        let shutdown_c = shutdown.clone();
+        let bridge = main_bridge.clone();
+
+        let h = std::thread::Builder::new()
+            .name(format!("pyronova-lb-srv-{i}"))
+            .spawn(move || {
+                try_pin_current(core_id);
+                elevate_thread_qos_macos();
+                let rt = RuntimeBuilder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("lb srv rt");
+                let local = LocalSet::new();
+                let mut worker = worker;
+                worker.tstate =
+                    unsafe { crate::interp::rebind_tstate_to_current_thread(worker.tstate) };
+                let worker = std::rc::Rc::new(std::cell::RefCell::new(worker));
+                local.block_on(&rt, async move {
+                    tpc_accept_loop_inline(addr, worker, routes_c, shutdown_c, None, bridge)
+                        .await;
+                });
+            })
+            .map_err(|e| format!("spawn lb-srv-{i}: {e}"))?;
+        handles.push(h);
+    }
+
+    // --- Client thread: a multi-thread tokio runtime hosting N client tasks ---
+    let shutdown_cli = shutdown.clone();
+    let total_cli = Arc::clone(&total);
+    let cli = std::thread::Builder::new()
+        .name("pyronova-lb-client".into())
+        .spawn(move || {
+            // Multi-thread runtime but conservative worker count so it
+            // doesn't crowd out server cores. Use 2 client threads —
+            // pipelining means a handful of client tasks saturate many
+            // server workers.
+            let rt = RuntimeBuilder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("lb client rt");
+            rt.block_on(async move {
+                // Stagger client connect to after the server listeners
+                // are certain to be up. 100ms is plenty at release mode.
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let mut tasks = Vec::with_capacity(client_conns);
+                for _ in 0..client_conns {
+                    let total = Arc::clone(&total_cli);
+                    let shutdown = shutdown_cli.clone();
+                    tasks.push(tokio::spawn(async move {
+                        let _ = tcp_client_conn(port, total, shutdown).await;
+                    }));
+                }
+                for t in tasks {
+                    let _ = t.await;
+                }
+            });
+        })
+        .map_err(|e| format!("spawn lb-client: {e}"))?;
+    handles.push(cli);
+
+    // Warmup + measure.
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    let start = total.load(Ordering::Relaxed);
+    let t0 = std::time::Instant::now();
+    std::thread::sleep(std::time::Duration::from_secs(duration_s));
+    let end = total.load(Ordering::Relaxed);
+    let elapsed = t0.elapsed().as_secs_f64();
+    shutdown.cancel();
+
+    for h in handles {
+        let _ = h.join();
+    }
+    Ok((end - start, elapsed, port))
+}
+
+async fn tcp_client_conn(
+    port: u16,
+    counter: Arc<AtomicU64>,
+    shutdown: CancellationToken,
+) -> std::io::Result<()> {
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await?;
+    stream.set_nodelay(true)?;
+
+    // Probe once to get response size.
+    stream.write_all(INMEM_REQ).await?;
+    let mut buf = vec![0u8; 4096];
+    let mut filled = 0usize;
+    let resp_size = loop {
+        let n = stream.read(&mut buf[filled..]).await?;
+        if n == 0 {
+            return Ok(());
+        }
+        filled += n;
+        if let Some(hdr_end) = buf[..filled].windows(4).position(|w| w == b"\r\n\r\n") {
+            let mut content_len: Option<usize> = None;
+            for line in buf[..hdr_end].split(|&b| b == b'\n') {
+                let line = line.strip_suffix(b"\r").unwrap_or(line);
+                if let Some(i) = line.iter().position(|&b| b == b':') {
+                    let (k, v) = (&line[..i], &line[i + 1..]);
+                    if k.eq_ignore_ascii_case(b"content-length") {
+                        if let Ok(s) = std::str::from_utf8(v) {
+                            if let Ok(parsed) = s.trim().parse::<usize>() {
+                                content_len = Some(parsed);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            let total = hdr_end + 4 + content_len.unwrap_or(0);
+            if buf.len() < total {
+                buf.resize(total + 128, 0);
+            }
+            while filled < total {
+                let n = stream.read(&mut buf[filled..]).await?;
+                if n == 0 {
+                    return Ok(());
+                }
+                filled += n;
+            }
+            break total;
+        }
+        if filled == buf.len() {
+            buf.resize(filled * 2, 0);
+        }
+    };
+    counter.fetch_add(1, Ordering::Relaxed);
+
+    let mut batch = Vec::with_capacity(INMEM_REQ.len() * INMEM_BATCH);
+    for _ in 0..INMEM_BATCH {
+        batch.extend_from_slice(INMEM_REQ);
+    }
+    let need = resp_size * INMEM_BATCH;
+    let mut rbuf = vec![0u8; need.max(8192)];
+
+    while !shutdown.is_cancelled() {
+        stream.write_all(&batch).await?;
+        let mut got = 0usize;
+        while got < need {
+            let n = stream.read(&mut rbuf[..]).await?;
+            if n == 0 {
+                return Ok(());
+            }
+            got += n;
+        }
+        counter.fetch_add(INMEM_BATCH as u64, Ordering::Relaxed);
+    }
+    Ok(())
 }
 
 pub(crate) fn env_enabled() -> bool {
