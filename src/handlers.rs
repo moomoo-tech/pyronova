@@ -73,31 +73,36 @@ pub(crate) async fn handle_request_tpc_inline(
         }
     }
 
-    // Python path: we now need owning strings for downstream dispatch
-    // (call_handler signature, logging, method/path passed by value
-    // into PyronovaRequest). Allocation is unavoidable here.
-    let method: Arc<str> = Arc::from(req.method().as_str());
-    let uri = req.uri().clone();
-    let path: Arc<str> = Arc::from(uri.path());
-    let query = uri.query().unwrap_or("").to_string();
+    // Decompose with `into_parts` — no uri/method/headers clone, no
+    // Arc::from, no `query.to_string()`. `hyper::Method` / `hyper::Uri`
+    // / `HeaderMap` are all Arc-backed internally; moving them out of
+    // Parts is refcount-free. The sub-interp hot path below runs
+    // entirely on `&str` borrows from these locals — zero heap
+    // allocations for method/path/query on the common route.
+    let (parts, body_obj) = req.into_parts();
+    let method = parts.method;
+    let uri = parts.uri;
+    let raw_headers = parts.headers;
 
-    let raw_headers = req.headers().clone();
     let accept_encoding = raw_headers
         .get(hyper::header::ACCEPT_ENCODING)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    let body_obj = req.into_body();
+
+    let method_str: &str = method.as_str();
+    let path: &str = uri.path();
+    let query: &str = uri.query().unwrap_or("");
 
     // Router lookup. Use RouteTable::lookup to get percent-decoding
     // of path params for free — raw matchit param iteration would
     // leave `john%20doe` undecoded. (This was the bug in v2.3.0's
     // first TPC draft; test_path_params_are_url_decoded caught it.)
-    let lookup = routes.lookup(&method, &path);
+    let lookup = routes.lookup(method_str, path);
 
     // Static files — only on GET/HEAD miss.
-    if lookup.is_none() && (method.as_ref() == "GET" || method.as_ref() == "HEAD") {
-        if let Some(resp) = try_static_file(&path, &routes.static_dirs).await {
+    if lookup.is_none() && (method_str == "GET" || method_str == "HEAD") {
+        if let Some(resp) = try_static_file(path, &routes.static_dirs).await {
             let mut r = full_body(resp);
             apply_cors(&mut r, routes.cors_config.as_ref());
             return Ok(r);
@@ -149,11 +154,13 @@ pub(crate) async fn handle_request_tpc_inline(
             }
         };
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        // Only here do we materialize owned strings — the bridge ships
+        // the item cross-thread so it must outlive these stack locals.
         let item = crate::main_bridge::GilWorkItem {
-            method: Arc::clone(&method),
-            path: Arc::clone(&path),
+            method: Arc::from(method_str),
+            path: Arc::from(path),
             params,
-            query,
+            query: query.to_string(),
             body: Bytes::from(body_bytes),
             headers,
             client_ip: client_ip_addr,
@@ -240,10 +247,10 @@ pub(crate) async fn handle_request_tpc_inline(
                 &routes.handler_names[handler_idx],
                 &routes.before_hook_names,
                 &routes.after_hook_names,
-                &method,
-                &path,
+                method_str,
+                path,
                 &params,
-                &query,
+                query,
                 &body_bytes,
                 &headers,
                 &client_ip_addr.to_string(),
