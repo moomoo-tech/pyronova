@@ -20,6 +20,7 @@ mod router;
 mod state;
 mod static_fs;
 mod stream;
+mod tpc;
 mod tls;
 mod types;
 mod websocket;

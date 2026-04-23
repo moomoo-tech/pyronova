@@ -13,7 +13,7 @@ use tokio::signal;
 
 /// Enable TCP_QUICKACK on a stream (Linux only, no-op elsewhere).
 #[allow(unused_variables)]
-fn setup_tcp_quickack(stream: &tokio::net::TcpStream) {
+pub(crate) fn setup_tcp_quickack(stream: &tokio::net::TcpStream) {
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::io::AsRawFd;
@@ -33,7 +33,7 @@ fn setup_tcp_quickack(stream: &tokio::net::TcpStream) {
 
 /// Create a TCP listener with SO_REUSEPORT (kernel load-balanced accept)
 /// and a large backlog (8192) to avoid SYN drops under extreme load.
-fn create_reuseport_listener(addr: SocketAddr) -> Result<std::net::TcpListener, String> {
+pub(crate) fn create_reuseport_listener(addr: SocketAddr) -> Result<std::net::TcpListener, String> {
     use socket2::{Domain, Protocol, Socket, Type};
 
     let domain = if addr.is_ipv4() {
@@ -109,7 +109,7 @@ use crate::websocket;
 /// hundred ms lets short-lived fds close and gives the OS room to recover.
 /// Transient per-connection errors (ECONNABORTED etc.) get a tiny yield to
 /// avoid degenerate tight loops without meaningfully delaying legitimate traffic.
-async fn handle_accept_error(e: &std::io::Error) {
+pub(crate) async fn handle_accept_error(e: &std::io::Error) {
     let backoff_ms = match e.raw_os_error() {
         Some(libc::EMFILE) | Some(libc::ENFILE) | Some(libc::ENOBUFS) | Some(libc::ENOMEM) => {
             tracing::error!(
@@ -136,6 +136,9 @@ pub(crate) struct PyronovaApp {
     cors_config: Option<crate::router::CorsConfig>,
     /// Per-instance request logging flag.
     request_logging: bool,
+    /// Opt into Thread-Per-Core mode. See docs/tpc-rearch.md. Can also
+    /// be flipped via the `PYRONOVA_TPC=1` env var; either is sufficient.
+    tpc: bool,
 }
 
 #[pymethods]
@@ -148,7 +151,13 @@ impl PyronovaApp {
             shared_state: Arc::new(dashmap::DashMap::new()),
             cors_config: None,
             request_logging: false,
+            tpc: false,
         }
+    }
+
+    /// Enable Thread-Per-Core mode (Phase 1 scaffolding).
+    fn set_tpc(&mut self, enabled: bool) {
+        self.tpc = enabled;
     }
 
     /// Set per-instance CORS origin (legacy setter — disables advanced CORS
@@ -396,7 +405,7 @@ impl PyronovaApp {
 
     #[pyo3(signature = (
         host=None, port=None, workers=None, mode=None, io_workers=None,
-        tls_cert=None, tls_key=None,
+        tls_cert=None, tls_key=None, tpc=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn run(
@@ -409,6 +418,7 @@ impl PyronovaApp {
         io_workers: Option<usize>,
         tls_cert: Option<&str>,
         tls_key: Option<&str>,
+        tpc: Option<bool>,
     ) -> PyResult<()> {
         // Start RSS sampler (once, opt-in via PYRONOVA_METRICS=1).
         // GIL contention is now measured passively on the request path —
@@ -485,16 +495,32 @@ impl PyronovaApp {
             }
         };
 
+        let tpc_enabled = tpc.unwrap_or(false) || self.tpc || crate::tpc::env_enabled();
+
         if mode == "subinterp" || mode == "auto" {
-            self.run_subinterp(
-                py,
-                addr,
-                workers,
-                io_workers,
-                num_cpus,
-                frozen,
-                tls_acceptor,
-            )
+            if tpc_enabled {
+                self.run_tpc_subinterp(
+                    py,
+                    addr,
+                    workers,
+                    io_workers,
+                    num_cpus,
+                    frozen,
+                    tls_acceptor,
+                )
+            } else {
+                self.run_subinterp(
+                    py,
+                    addr,
+                    workers,
+                    io_workers,
+                    num_cpus,
+                    frozen,
+                    tls_acceptor,
+                )
+            }
+        } else if tpc_enabled {
+            self.run_tpc_gil(py, addr, io_workers, num_cpus, frozen, tls_acceptor)
         } else {
             self.run_gil(py, addr, io_workers, num_cpus, frozen, tls_acceptor)
         }
@@ -970,6 +996,92 @@ impl PyronovaApp {
 
                 Ok(())
             })
+        })
+    }
+
+    /// TPC GIL entry — Phase 1 scaffolding. Same dispatch semantics as
+    /// `run_gil` (every handler on the main interpreter), different
+    /// accept layer (N pinned OS threads × current_thread runtime ×
+    /// SO_REUSEPORT, no cross-core task migration).
+    #[allow(clippy::too_many_arguments)]
+    fn run_tpc_gil(
+        &self,
+        py: Python<'_>,
+        addr: SocketAddr,
+        io_workers: usize,
+        num_cpus: usize,
+        routes: FrozenRoutes,
+        tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
+    ) -> PyResult<()> {
+        py.detach(move || -> PyResult<()> {
+            crate::tpc::run_tpc_gil(addr, io_workers, num_cpus, routes, tls_acceptor)
+                .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        })
+    }
+
+    /// TPC sub-interp entry — Phase 1 still dispatches to the old
+    /// InterpreterPool via `submit()`. Phase 2 replaces that with a
+    /// per-thread sub-interpreter owned by the TPC worker.
+    #[allow(clippy::too_many_arguments)]
+    fn run_tpc_subinterp(
+        &self,
+        py: Python<'_>,
+        addr: SocketAddr,
+        workers: usize,
+        io_workers: usize,
+        num_cpus: usize,
+        routes: FrozenRoutes,
+        tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
+    ) -> PyResult<()> {
+        let script_path = if let Some(ref p) = self.script_path {
+            p.clone()
+        } else {
+            let main_mod = py.import("__main__")?;
+            main_mod.getattr("__file__")?.extract::<String>()?
+        };
+
+        let (
+            handler_names,
+            routers,
+            before_hook_names,
+            after_hook_names,
+            static_dirs,
+            requires_gil,
+        ) = (
+            routes.handler_names.clone(),
+            routes.routers.clone(),
+            routes.before_hook_names.clone(),
+            routes.after_hook_names.clone(),
+            routes.static_dirs.clone(),
+            routes.requires_gil.clone(),
+        );
+
+        let pool = unsafe {
+            interp::InterpreterPool::new(
+                workers,
+                py,
+                &script_path,
+                &handler_names,
+                routers,
+                &before_hook_names,
+                &after_hook_names,
+                static_dirs,
+                requires_gil,
+                routes.is_async.clone(),
+                self.cors_config.clone(),
+                self.request_logging,
+            )
+            .map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "sub-interpreter pool error: {e}"
+                ))
+            })?
+        };
+        let pool = Arc::new(pool);
+
+        py.detach(move || -> PyResult<()> {
+            crate::tpc::run_tpc_subinterp(addr, io_workers, num_cpus, pool, routes, tls_acceptor)
+                .map_err(pyo3::exceptions::PyRuntimeError::new_err)
         })
     }
 }
