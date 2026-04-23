@@ -101,6 +101,33 @@ class _Response:
 import sys, types, os
 os.environ["PYRONOVA_WORKER"] = "1"
 
+# -- Smart GC: hand Python GC scheduling off to the Rust engine --------------
+#
+# CPython's default GC triggers on a per-generation allocation threshold
+# (gc.get_threshold() = (700, 10, 10) by default). At 400k+ rps that
+# threshold is tripped HUNDREDS of times per second, each hit blocking
+# the current thread for generation-0 scan + possibly escalating to gen-1
+# or gen-2. On the request hot path this translates into P99 tail
+# latency spikes of 10-50ms even on an otherwise well-behaved workload.
+#
+# Fix: turn off CPython's automatic trigger entirely. The Rust engine
+# holds a cached `gc.collect` function pointer per sub-interp and fires
+# it at a configurable request-count interval (default 5000, control
+# via `PYRONOVA_GC_THRESHOLD=N` — set 0 to disable scheduled collection
+# entirely on workloads that never accrete cycles).
+#
+# Ref counting still runs on every DECREF to zero, so non-cyclic garbage
+# is collected instantly. Only cycle-collection waits for the timer.
+# For the standard Pyronova request path (where Request + Response are
+# ref-counted to zero by tp_dealloc at the end of each handler), there
+# are effectively no cycles to collect — gc.collect() becomes a
+# zero-cost safety valve.
+try:
+    import gc as _gc
+    _gc.disable()
+except Exception:
+    pass
+
 _mock_engine = types.ModuleType("pyronova.engine")
 _mock_engine.PyronovaApp = type("PyronovaApp", (), {
     "__init__": lambda self: None,

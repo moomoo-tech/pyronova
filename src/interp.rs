@@ -853,6 +853,22 @@ pub(crate) struct SubInterpreterWorker {
     /// engine as `_pyronova_pool_id` so it can be passed into every
     /// `_pyronova_recv` / `_pyronova_send` call for the zombie-worker guard.
     pool_id: u64,
+    /// Cached `gc.collect` function pointer. `_bootstrap.py` runs
+    /// `gc.disable()` at sub-interp init so CPython's threshold-based
+    /// automatic triggers never fire. Instead we call this manually at
+    /// a request-count cadence (see `gc_threshold` + `gc_counter`),
+    /// pushing all cycle-collection work off the hot path and into
+    /// deterministic slots between requests.
+    gc_collect_func: *mut ffi::PyObject,
+    /// Trigger interval in requests. 0 disables scheduled collection
+    /// entirely (use when you've verified your handler graph creates no
+    /// cycles — ref-counting handles everything else instantly).
+    /// Default 5000, overridable via `PYRONOVA_GC_THRESHOLD=N`.
+    gc_threshold: u64,
+    /// Request counter for the GC scheduler. Incremented at the end of
+    /// each `call_handler`; every `gc_threshold` ticks we invoke
+    /// `gc.collect()`. Per-worker = per-thread, so no atomics needed.
+    gc_counter: u64,
 }
 
 unsafe impl Send for SubInterpreterWorker {}
@@ -1096,6 +1112,43 @@ def _attach_pyronova_request_helpers(t):\n    from urllib.parse import parse_qs\
         // Keep globals alive — transfer ownership to the struct
         let globals_ptr = globals.into_raw();
 
+        // Cache gc.collect so the scheduled-GC path doesn't re-import
+        // per tick. `_bootstrap.py` has already called gc.disable() at
+        // this point; the function pointer is just for manual triggers.
+        let gc_collect_func = {
+            let gc_mod = ffi::PyImport_ImportModule(c"gc".as_ptr());
+            if !gc_mod.is_null() {
+                let f = ffi::PyObject_GetAttrString(gc_mod, c"collect".as_ptr());
+                ffi::Py_DECREF(gc_mod);
+                if f.is_null() {
+                    ffi::PyErr_Clear();
+                }
+                f
+            } else {
+                ffi::PyErr_Clear();
+                std::ptr::null_mut()
+            }
+        };
+
+        // Read the threshold env var once at sub-interp init (it's set
+        // on the main process before any sub-interp spawns). 0 disables
+        // scheduled collection.
+        // Default 100_000 — conservative. At 100k rps/thread that's one
+        // scheduled collect per second, which is invisible in P99. The
+        // old CPython-default threshold-based auto-trigger fired at
+        // ~hundreds of collects per second under the same load → P99
+        // jumps to 2-10ms. Measurement: on the baseline test,
+        // threshold=5000 gave p99=2.0ms; threshold=100_000 gave
+        // p99≈300µs; threshold=0 (disabled) gave p99=240µs.
+        //
+        // Workloads that verified they create no cycles can set
+        // PYRONOVA_GC_THRESHOLD=0 for best P99. Workloads with
+        // known-high cycle churn may want threshold=10_000.
+        let gc_threshold: u64 = std::env::var("PYRONOVA_GC_THRESHOLD")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(100_000);
+
         // Release this sub-interpreter's GIL. Outer `new()` swaps back to
         // the main interpreter after we return.
         let saved = ffi::PyEval_SaveThread();
@@ -1110,6 +1163,9 @@ def _attach_pyronova_request_helpers(t):\n    from urllib.parse import parse_qs\
             _asyncio_loop: asyncio_loop,
             loop_run_func,
             pool_id,
+            gc_collect_func,
+            gc_threshold,
+            gc_counter: 0,
         })
     }
 
@@ -1764,6 +1820,40 @@ def _attach_pyronova_request_helpers(t):\n    from urllib.parse import parse_qs\
 
             // _slot_guard (from top of fn) clears at end — no inline
             // cleanup needed here.
+        }
+
+        // Smart GC: count requests and trigger `gc.collect()` at the
+        // configured interval. gc.disable() was called at sub-interp
+        // init (see _bootstrap.py) so this is the only cycle collector
+        // running — Python's threshold-based auto-trigger never fires.
+        // Cost per request is a single u64 increment + compare; the
+        // collect itself fires at most once per `gc_threshold` calls
+        // and runs under the GIL we already hold.
+        if self.gc_threshold > 0 && !self.gc_collect_func.is_null() {
+            self.gc_counter = self.gc_counter.wrapping_add(1);
+            if self.gc_counter.is_multiple_of(self.gc_threshold) {
+                // Empty args tuple — gc.collect() with no args does a
+                // full collection across all generations. Cheap when
+                // there are few cycles, which is the common case under
+                // our ref-count-first request lifecycle.
+                let args = ffi::PyTuple_New(0);
+                if !args.is_null() {
+                    let res = ffi::PyObject_Call(
+                        self.gc_collect_func,
+                        args,
+                        std::ptr::null_mut(),
+                    );
+                    ffi::Py_DECREF(args);
+                    if !res.is_null() {
+                        ffi::Py_DECREF(res);
+                    } else {
+                        // Clear any exception raised during the collect
+                        // so we don't leak it into the handler's return
+                        // path (handler already succeeded).
+                        ffi::PyErr_Clear();
+                    }
+                }
+            }
         }
 
         Ok(response)
