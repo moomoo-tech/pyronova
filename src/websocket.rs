@@ -318,11 +318,19 @@ where
             // reaches all the way to the wire.
             msg = ws_source.next() => {
                 match msg {
+                    // clippy::collapsible_match (added in Rust 1.95) wants
+                    // the inner `if .is_err() { break }` rewritten as a
+                    // match guard. That works but requires duplicating the
+                    // arm pattern (one with the side-effect-bearing guard,
+                    // one bare to swallow the success case) — uglier than
+                    // the original nested if. Keep the readable form.
+                    #[allow(clippy::collapsible_match)]
                     Some(Ok(Message::Text(text))) => {
                         if incoming_tx.send(WsMsg::Text(text.to_string())).await.is_err() {
                             break;
                         }
                     }
+                    #[allow(clippy::collapsible_match)]
                     Some(Ok(Message::Binary(data))) => {
                         if incoming_tx.send(WsMsg::Binary(data.to_vec())).await.is_err() {
                             break;
