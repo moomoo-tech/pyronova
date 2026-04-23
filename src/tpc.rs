@@ -396,11 +396,22 @@ fn run_tpc_subinterp_per_thread_listener(
         });
     });
 
+    // Leak one Arc into a `&'static RouteTable` shared across workers.
+    // The RouteTable is read-only after startup; leaking the Arc means
+    // per-request dispatch on the hot path does zero refcount ops. The
+    // memory cost is one RouteTable worth, held for the server's life
+    // — acceptable for a long-running server. `Arc::into_raw` + deref
+    // is the stable-since-1.0 way to get this; the pointer is never
+    // reclaimed, which is the whole point.
+    let routes_static: &'static crate::router::RouteTable = unsafe {
+        &*Arc::into_raw(Arc::clone(&routes))
+    };
+
     let mut handles = Vec::with_capacity(n_threads);
     for i in 0..n_threads {
         let core_id = core_ids.get(i).copied();
         let worker = workers.remove(0);
-        let routes = Arc::clone(&routes);
+        let routes_arc = Arc::clone(&routes);
         let shutdown = shutdown.clone();
         let tls = tls_acceptor.clone();
 
@@ -424,7 +435,7 @@ fn run_tpc_subinterp_per_thread_listener(
                 };
                 let worker = std::rc::Rc::new(std::cell::RefCell::new(worker));
                 local.block_on(&rt, async move {
-                    tpc_accept_loop_inline(addr, worker, routes, shutdown, tls, bridge).await;
+                    tpc_accept_loop_inline(addr, worker, routes_static, routes_arc, shutdown, tls, bridge).await;
                 });
             })
             .map_err(|e| format!("spawn tpc-{i}: {e}"))?;
@@ -492,12 +503,18 @@ fn run_tpc_subinterp_fanout(
         worker_rxs.push(Some(rx));
     }
 
+    // Leak once for a shared &'static, same rationale as the per-thread
+    // listener path. All workers read from the same static, no Arc ops.
+    let routes_static: &'static crate::router::RouteTable = unsafe {
+        &*Arc::into_raw(Arc::clone(&routes))
+    };
+
     let mut handles = Vec::with_capacity(n_threads + 1);
 
     for i in 0..n_threads {
         let core_id = core_ids.get(i).copied();
         let worker = workers.remove(0);
-        let routes = Arc::clone(&routes);
+        let routes_arc = Arc::clone(&routes);
         let shutdown_w = shutdown.clone();
         let tls = tls_acceptor.clone();
         let bridge = main_bridge.clone();
@@ -520,7 +537,7 @@ fn run_tpc_subinterp_fanout(
                     unsafe { crate::interp::rebind_tstate_to_current_thread(worker.tstate) };
                 let worker = std::rc::Rc::new(std::cell::RefCell::new(worker));
                 local.block_on(&rt, async move {
-                    tpc_worker_loop_fanout(rx, worker, routes, shutdown_w, tls, bridge).await;
+                    tpc_worker_loop_fanout(rx, worker, routes_static, routes_arc, shutdown_w, tls, bridge).await;
                 });
             })
             .map_err(|e| format!("spawn tpc-{i}: {e}"))?;
@@ -628,7 +645,8 @@ fn run_tpc_subinterp_fanout(
 async fn tpc_worker_loop_fanout(
     mut rx: tokio::sync::mpsc::Receiver<(std::net::TcpStream, SocketAddr)>,
     worker: std::rc::Rc<std::cell::RefCell<SubInterpreterWorker>>,
-    routes: FrozenRoutes,
+    routes_static: &'static crate::router::RouteTable,
+    routes_arc: FrozenRoutes,
     shutdown: CancellationToken,
     tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
     main_bridge: Option<Arc<crate::main_bridge::MainInterpBridge>>,
@@ -657,12 +675,12 @@ async fn tpc_worker_loop_fanout(
                         }
                     };
                     let worker_clone = std::rc::Rc::clone(&worker);
-                    let routes = Arc::clone(&routes);
+                    let routes_arc_c = Arc::clone(&routes_arc);
                     let conn_token = shutdown.clone();
                     let tls_acc_c = tls_acceptor.clone();
                     let bridge_c = main_bridge.clone();
                     tracker.spawn_local(async move {
-                        drive_inline_conn(stream, remote_addr, worker_clone, routes, conn_token, tls_acc_c, bridge_c).await;
+                        drive_inline_conn(stream, remote_addr, worker_clone, routes_static, routes_arc_c, conn_token, tls_acc_c, bridge_c).await;
                     });
                 }
                 None => break,
@@ -745,7 +763,8 @@ fn fire_gc(worker: &std::rc::Rc<std::cell::RefCell<SubInterpreterWorker>>) {
 async fn tpc_accept_loop_inline(
     addr: SocketAddr,
     worker: std::rc::Rc<std::cell::RefCell<SubInterpreterWorker>>,
-    routes: FrozenRoutes,
+    routes_static: &'static crate::router::RouteTable,
+    routes_arc: FrozenRoutes,
     shutdown: CancellationToken,
     tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
     main_bridge: Option<Arc<crate::main_bridge::MainInterpBridge>>,
@@ -803,12 +822,12 @@ async fn tpc_accept_loop_inline(
                                 requests_since_last_gc += 1;
 
                                 let worker_clone = std::rc::Rc::clone(&worker);
-                                let routes = Arc::clone(&routes);
+                                let routes_arc_c = Arc::clone(&routes_arc);
                                 let conn_token = shutdown.clone();
                                 let tls_acc_c = tls_acceptor.clone();
                                 let bridge_c = main_bridge.clone();
                                 tracker.spawn_local(async move {
-                                    drive_inline_conn(stream, remote_addr, worker_clone, routes, conn_token, tls_acc_c, bridge_c).await;
+                                    drive_inline_conn(stream, remote_addr, worker_clone, routes_static, routes_arc_c, conn_token, tls_acc_c, bridge_c).await;
                                 });
 
                                 // Failsafe: sustained burst — accept
@@ -848,12 +867,12 @@ async fn tpc_accept_loop_inline(
                                 setup_tcp_quickack(&stream);
 
                                 let worker_clone = std::rc::Rc::clone(&worker);
-                                let routes = Arc::clone(&routes);
+                                let routes_arc_c = Arc::clone(&routes_arc);
                                 let conn_token = shutdown.clone();
                                 let tls_acc_c = tls_acceptor.clone();
                                 let bridge_c = main_bridge.clone();
                                 tracker.spawn_local(async move {
-                                    drive_inline_conn(stream, remote_addr, worker_clone, routes, conn_token, tls_acc_c, bridge_c).await;
+                                    drive_inline_conn(stream, remote_addr, worker_clone, routes_static, routes_arc_c, conn_token, tls_acc_c, bridge_c).await;
                                 });
                             }
                             Err(e) => handle_accept_error(&e).await,
@@ -871,7 +890,8 @@ async fn drive_inline_conn(
     stream: tokio::net::TcpStream,
     remote_addr: SocketAddr,
     worker: std::rc::Rc<std::cell::RefCell<SubInterpreterWorker>>,
-    routes: FrozenRoutes,
+    routes: &'static crate::router::RouteTable,
+    routes_arc_for_ws: FrozenRoutes,
     conn_token: CancellationToken,
     tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
     main_bridge: Option<Arc<crate::main_bridge::MainInterpBridge>>,
@@ -887,14 +907,26 @@ async fn drive_inline_conn(
         None => crate::tls::wrap_plain(stream),
     };
     let io = TokioIo::new(tls_stream);
+    // `routes_arc_for_ws` is held by the connection and cloned ONLY
+    // into the rare WS upgrade branch. Non-WS requests pay zero Arc
+    // ops on the hot path (the `&'static` handles everything).
+    let ws_routes_conn = routes_arc_for_ws;
     let svc = service_fn(move |req: Request<Incoming>| {
         let worker = std::rc::Rc::clone(&worker);
-        let routes = Arc::clone(&routes);
         let bridge = main_bridge.clone();
         let client_ip_addr = remote_addr.ip();
+        // Branch detection BEFORE async move so we can keep the Arc
+        // clone gated behind the actual WS path. Option<Arc<_>>::None
+        // drop is a no-op, so the hot path stays atomic-free.
+        let is_ws = websocket::is_websocket_upgrade(&req);
+        let ws_routes: Option<FrozenRoutes> = if is_ws {
+            Some(Arc::clone(&ws_routes_conn))
+        } else {
+            None
+        };
         async move {
-            if websocket::is_websocket_upgrade(&req) {
-                websocket::handle_websocket(req, routes).await
+            if is_ws {
+                websocket::handle_websocket(req, ws_routes.expect("ws routes set")).await
             } else {
                 handle_request_tpc_inline(req, routes, worker, client_ip_addr, bridge).await
             }
@@ -1070,14 +1102,20 @@ pub(crate) fn run_inmem_bench(
     let total = Arc::new(AtomicU64::new(0));
     let core_ids = core_affinity::get_core_ids().unwrap_or_default();
 
+    // Leak each per-worker Arc into a &'static RouteTable up-front.
+    // Each worker gets its own leaked pointer so the read-only route
+    // data lives on its own cacheline but is referenced without any
+    // refcount ops per request.
+    let per_worker_static: Vec<&'static crate::router::RouteTable> = per_worker_routes
+        .drain(..)
+        .map(|arc| unsafe { &*Arc::into_raw(arc) } as &'static crate::router::RouteTable)
+        .collect();
+
     let mut handles = Vec::with_capacity(n_threads);
     for i in 0..n_threads {
         let core_id = core_ids.get(i).copied();
         let worker = workers.remove(0);
-        // Per-worker Arc instance — refcount cacheline is exclusive to
-        // this thread, eliminating cross-core ping-pong on per-request
-        // Arc::clone(&routes) inside service_fn.
-        let routes = per_worker_routes.remove(0);
+        let routes: &'static crate::router::RouteTable = per_worker_static[i];
         let shutdown = shutdown.clone();
         let bridge = main_bridge.clone();
         let total = Arc::clone(&total);
@@ -1102,14 +1140,13 @@ pub(crate) fn run_inmem_bench(
                     for _ in 0..conns_per_worker {
                         let (server_half, client_half) = tokio::io::duplex(64 * 1024);
                         let worker_c = std::rc::Rc::clone(&worker);
-                        let routes_c = Arc::clone(&routes);
                         let shutdown_c = shutdown.clone();
                         let bridge_c = bridge.clone();
                         tokio::task::spawn_local(async move {
                             drive_inmem_conn(
                                 server_half,
                                 worker_c,
-                                routes_c,
+                                routes,
                                 shutdown_c,
                                 bridge_c,
                             )
@@ -1146,7 +1183,7 @@ pub(crate) fn run_inmem_bench(
 async fn drive_inmem_conn(
     stream: tokio::io::DuplexStream,
     worker: std::rc::Rc<std::cell::RefCell<SubInterpreterWorker>>,
-    routes: FrozenRoutes,
+    routes: &'static crate::router::RouteTable,
     conn_token: CancellationToken,
     main_bridge: Option<Arc<crate::main_bridge::MainInterpBridge>>,
 ) {
@@ -1154,7 +1191,8 @@ async fn drive_inmem_conn(
     let io = TokioIo::new(stream);
     let svc = service_fn(move |req: Request<Incoming>| {
         let worker = std::rc::Rc::clone(&worker);
-        let routes = Arc::clone(&routes);
+        // `routes` is `&'static RouteTable` — Copy, captured by value,
+        // zero atomic operations per request. This is the whole point.
         let bridge = main_bridge.clone();
         async move {
             handle_request_tpc_inline(req, routes, worker, remote_addr, bridge).await
@@ -1322,12 +1360,17 @@ pub(crate) fn run_loopback_bench(
     let total = Arc::new(AtomicU64::new(0));
     let core_ids = core_affinity::get_core_ids().unwrap_or_default();
 
+    // Shared leaked &'static route table across all server workers.
+    let routes_static: &'static crate::router::RouteTable = unsafe {
+        &*Arc::into_raw(Arc::clone(&routes))
+    };
+
     // --- Server threads (mirrors run_tpc_subinterp_per_thread_listener) ---
     let mut handles = Vec::with_capacity(n_threads + 1);
     for i in 0..n_threads {
         let core_id = core_ids.get(i).copied();
         let worker = workers.remove(0);
-        let routes_c = Arc::clone(&routes);
+        let routes_arc_c = Arc::clone(&routes);
         let shutdown_c = shutdown.clone();
         let bridge = main_bridge.clone();
 
@@ -1346,7 +1389,7 @@ pub(crate) fn run_loopback_bench(
                     unsafe { crate::interp::rebind_tstate_to_current_thread(worker.tstate) };
                 let worker = std::rc::Rc::new(std::cell::RefCell::new(worker));
                 local.block_on(&rt, async move {
-                    tpc_accept_loop_inline(addr, worker, routes_c, shutdown_c, None, bridge)
+                    tpc_accept_loop_inline(addr, worker, routes_static, routes_arc_c, shutdown_c, None, bridge)
                         .await;
                 });
             })

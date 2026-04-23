@@ -44,7 +44,7 @@ type SharedPool = Arc<interp::InterpreterPool>;
 
 pub(crate) async fn handle_request_tpc_inline(
     req: Request<Incoming>,
-    routes: FrozenRoutes,
+    routes: &'static crate::router::RouteTable,
     worker: std::rc::Rc<std::cell::RefCell<interp::SubInterpreterWorker>>,
     client_ip_addr: std::net::IpAddr,
     main_bridge: Option<Arc<crate::main_bridge::MainInterpBridge>>,
