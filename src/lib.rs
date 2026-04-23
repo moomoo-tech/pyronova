@@ -25,6 +25,7 @@ mod tpc;
 mod tls;
 mod types;
 mod websocket;
+mod worker;
 
 use pyo3::prelude::*;
 

@@ -30,7 +30,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::app::{create_reuseport_listener, handle_accept_error, setup_tcp_quickack};
-use crate::handlers::{handle_request, handle_request_tpc_inline};
+use crate::handlers::handle_request;
 use crate::interp::SubInterpreterWorker;
 use crate::router::FrozenRoutes;
 use crate::websocket;
@@ -680,7 +680,7 @@ async fn tpc_worker_loop_fanout(
                     let tls_acc_c = tls_acceptor.clone();
                     let bridge_c = main_bridge.clone();
                     tracker.spawn_local(async move {
-                        drive_inline_conn(stream, remote_addr, worker_clone, routes_static, routes_arc_c, conn_token, tls_acc_c, bridge_c).await;
+                        crate::worker::drive_tcp_conn(stream, remote_addr, worker_clone, routes_static, routes_arc_c, conn_token, tls_acc_c, bridge_c).await;
                     });
                 }
                 None => break,
@@ -827,7 +827,7 @@ async fn tpc_accept_loop_inline(
                                 let tls_acc_c = tls_acceptor.clone();
                                 let bridge_c = main_bridge.clone();
                                 tracker.spawn_local(async move {
-                                    drive_inline_conn(stream, remote_addr, worker_clone, routes_static, routes_arc_c, conn_token, tls_acc_c, bridge_c).await;
+                                    crate::worker::drive_tcp_conn(stream, remote_addr, worker_clone, routes_static, routes_arc_c, conn_token, tls_acc_c, bridge_c).await;
                                 });
 
                                 // Failsafe: sustained burst — accept
@@ -872,7 +872,7 @@ async fn tpc_accept_loop_inline(
                                 let tls_acc_c = tls_acceptor.clone();
                                 let bridge_c = main_bridge.clone();
                                 tracker.spawn_local(async move {
-                                    drive_inline_conn(stream, remote_addr, worker_clone, routes_static, routes_arc_c, conn_token, tls_acc_c, bridge_c).await;
+                                    crate::worker::drive_tcp_conn(stream, remote_addr, worker_clone, routes_static, routes_arc_c, conn_token, tls_acc_c, bridge_c).await;
                                 });
                             }
                             Err(e) => handle_accept_error(&e).await,
@@ -886,81 +886,7 @@ async fn tpc_accept_loop_inline(
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), tracker.wait()).await;
 }
 
-async fn drive_inline_conn(
-    stream: tokio::net::TcpStream,
-    remote_addr: SocketAddr,
-    worker: std::rc::Rc<std::cell::RefCell<SubInterpreterWorker>>,
-    routes: &'static crate::router::RouteTable,
-    routes_arc_for_ws: FrozenRoutes,
-    conn_token: CancellationToken,
-    tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
-    main_bridge: Option<Arc<crate::main_bridge::MainInterpBridge>>,
-) {
-    let tls_stream = match tls_acceptor {
-        Some(acc) => match crate::tls::wrap_tls(&acc, stream).await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(target: "pyronova::server", error = %e, "TLS handshake failed");
-                return;
-            }
-        },
-        None => crate::tls::wrap_plain(stream),
-    };
-    let io = TokioIo::new(tls_stream);
-    // `routes_arc_for_ws` is held by the connection and cloned ONLY
-    // into the rare WS upgrade branch. Non-WS requests pay zero Arc
-    // ops on the hot path (the `&'static` handles everything).
-    let ws_routes_conn = routes_arc_for_ws;
-    let svc = service_fn(move |req: Request<Incoming>| {
-        let worker = std::rc::Rc::clone(&worker);
-        let bridge = main_bridge.clone();
-        let client_ip_addr = remote_addr.ip();
-        // Branch detection BEFORE async move so we can keep the Arc
-        // clone gated behind the actual WS path. Option<Arc<_>>::None
-        // drop is a no-op, so the hot path stays atomic-free.
-        let is_ws = websocket::is_websocket_upgrade(&req);
-        let ws_routes: Option<FrozenRoutes> = if is_ws {
-            Some(Arc::clone(&ws_routes_conn))
-        } else {
-            None
-        };
-        async move {
-            if is_ws {
-                websocket::handle_websocket(req, ws_routes.expect("ws routes set")).await
-            } else {
-                handle_request_tpc_inline(req, routes, worker, client_ip_addr, bridge).await
-            }
-        }
-    });
-    let mut builder = AutoBuilder::new(LocalExec);
-    builder
-        .http1()
-        .timer(hyper_util::rt::TokioTimer::new())
-        .header_read_timeout(std::time::Duration::from_secs(10));
-    let conn = builder.serve_connection_with_upgrades(io, svc);
-    tokio::pin!(conn);
-    let mut graceful_sent = false;
-    loop {
-        tokio::select! {
-            res = conn.as_mut() => {
-                if let Err(e) = res {
-                    let msg = e.to_string();
-                    if !msg.contains("connection closed")
-                        && !msg.contains("reset by peer")
-                        && !msg.contains("broken pipe")
-                    {
-                        tracing::warn!(target: "pyronova::server", error = %e, "Connection error");
-                    }
-                }
-                break;
-            }
-            _ = conn_token.cancelled(), if !graceful_sent => {
-                conn.as_mut().graceful_shutdown();
-                graceful_sent = true;
-            }
-        }
-    }
-}
+// drive_inline_conn moved to worker::drive_tcp_conn.
 
 // ---------------------------------------------------------------------------
 // Flag
@@ -1143,10 +1069,12 @@ pub(crate) fn run_inmem_bench(
                         let shutdown_c = shutdown.clone();
                         let bridge_c = bridge.clone();
                         tokio::task::spawn_local(async move {
-                            drive_inmem_conn(
+                            crate::worker::drive_conn(
                                 server_half,
+                                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
                                 worker_c,
                                 routes,
+                                None, // bench: no WS upgrades
                                 shutdown_c,
                                 bridge_c,
                             )
@@ -1180,43 +1108,7 @@ pub(crate) fn run_inmem_bench(
     Ok((end - start, elapsed))
 }
 
-async fn drive_inmem_conn(
-    stream: tokio::io::DuplexStream,
-    worker: std::rc::Rc<std::cell::RefCell<SubInterpreterWorker>>,
-    routes: &'static crate::router::RouteTable,
-    conn_token: CancellationToken,
-    main_bridge: Option<Arc<crate::main_bridge::MainInterpBridge>>,
-) {
-    let remote_addr: std::net::IpAddr = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
-    let io = TokioIo::new(stream);
-    let svc = service_fn(move |req: Request<Incoming>| {
-        let worker = std::rc::Rc::clone(&worker);
-        // `routes` is `&'static RouteTable` — Copy, captured by value,
-        // zero atomic operations per request. This is the whole point.
-        let bridge = main_bridge.clone();
-        async move {
-            handle_request_tpc_inline(req, routes, worker, remote_addr, bridge).await
-        }
-    });
-    let mut builder = AutoBuilder::new(LocalExec);
-    builder
-        .http1()
-        .timer(hyper_util::rt::TokioTimer::new())
-        .header_read_timeout(std::time::Duration::from_secs(10));
-    let conn = builder.serve_connection(io, svc);
-    tokio::pin!(conn);
-    loop {
-        tokio::select! {
-            res = conn.as_mut() => {
-                let _ = res;
-                break;
-            }
-            _ = conn_token.cancelled() => {
-                conn.as_mut().graceful_shutdown();
-            }
-        }
-    }
-}
+// drive_inmem_conn removed — callers go straight to worker::drive_conn.
 
 async fn inmem_generator(
     mut stream: tokio::io::DuplexStream,
