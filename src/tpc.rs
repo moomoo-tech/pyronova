@@ -29,9 +29,9 @@ use tokio::task::LocalSet;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use crate::app::{create_reuseport_listener, handle_accept_error, setup_tcp_quickack};
 use crate::handlers::handle_request;
-use crate::interp::SubInterpreterWorker;
+use crate::server::listener::{create_reuseport_listener, handle_accept_error, setup_tcp_quickack};
+use crate::python::interp::SubInterpreterWorker;
 use crate::router::FrozenRoutes;
 use crate::websocket;
 
@@ -431,7 +431,7 @@ fn run_tpc_subinterp_per_thread_listener(
                 // Must happen on the TPC thread itself, not on main.
                 let mut worker = worker;
                 worker.tstate = unsafe {
-                    crate::interp::rebind_tstate_to_current_thread(worker.tstate)
+                    crate::python::interp::rebind_tstate_to_current_thread(worker.tstate)
                 };
                 let worker = std::rc::Rc::new(std::cell::RefCell::new(worker));
                 local.block_on(&rt, async move {
@@ -534,7 +534,7 @@ fn run_tpc_subinterp_fanout(
                 let local = LocalSet::new();
                 let mut worker = worker;
                 worker.tstate =
-                    unsafe { crate::interp::rebind_tstate_to_current_thread(worker.tstate) };
+                    unsafe { crate::python::interp::rebind_tstate_to_current_thread(worker.tstate) };
                 let worker = std::rc::Rc::new(std::cell::RefCell::new(worker));
                 local.block_on(&rt, async move {
                     tpc_worker_loop_fanout(rx, worker, routes_static, routes_arc, shutdown_w, tls, bridge).await;
@@ -562,7 +562,7 @@ fn run_tpc_subinterp_fanout(
                 .build()
                 .expect("acceptor runtime");
             rt.block_on(async move {
-                let std_listener = match crate::app::create_reuseport_listener(addr) {
+                let std_listener = match crate::server::listener::create_reuseport_listener(addr) {
                     Ok(l) => l,
                     Err(e) => {
                         tracing::error!(target: "pyronova::server", error = %e, "TPC fanout listener failed");
@@ -622,7 +622,7 @@ fn run_tpc_subinterp_fanout(
                                     next = 0;
                                 }
                             }
-                            Err(e) => crate::app::handle_accept_error(&e).await,
+                            Err(e) => crate::server::listener::handle_accept_error(&e).await,
                         }
                     }
                 }
@@ -747,7 +747,7 @@ fn fire_gc(worker: &std::rc::Rc<std::cell::RefCell<SubInterpreterWorker>>) {
     }
     let tstate_cell = std::cell::Cell::new(w.tstate);
     unsafe {
-        let _guard = crate::interp::SubInterpGilGuard::acquire(tstate_cell.get(), &tstate_cell);
+        let _guard = crate::python::interp::SubInterpGilGuard::acquire(tstate_cell.get(), &tstate_cell);
         // PyObject_CallNoArgs: skip the empty-tuple alloc the generic
         // PyObject_Call path requires. Idiomatic 3.9+ invocation.
         let res = ffi::PyObject_CallNoArgs(w.gc_collect_func);

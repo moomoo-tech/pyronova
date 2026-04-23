@@ -8,10 +8,10 @@ use hyper::{Response, StatusCode};
 use pyo3::prelude::*;
 use pyo3::types::PyString;
 
-use crate::interp;
+use crate::python::interp;
 use crate::response::{error_response, extract_response_data, payload_too_large_response};
 use crate::router::FrozenRoutes;
-use crate::stream::PyronovaStream;
+use crate::python::stream::PyronovaStream;
 use crate::types::{PyronovaRequest, PyronovaResponse, ResponseData};
 
 pub(crate) type SharedPool = Arc<interp::InterpreterPool>;
@@ -262,10 +262,10 @@ pub(crate) fn build_fast_response(
 /// 30 s budget as the buffered path).
 pub(crate) async fn stream_body_feeder(
     body: Incoming,
-    tx: tokio::sync::mpsc::Sender<crate::body_stream::ChunkMsg>,
+    tx: tokio::sync::mpsc::Sender<crate::python::body_stream::ChunkMsg>,
     max_size: usize,
 ) {
-    use crate::body_stream::ChunkMsg;
+    use crate::python::body_stream::ChunkMsg;
     use hyper::body::Body;
     let mut body = body;
     let mut total: usize = 0;

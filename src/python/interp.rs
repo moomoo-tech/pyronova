@@ -928,7 +928,7 @@ impl SubInterpreterWorker {
         pool_id: u64,
     ) -> Result<Self, String> {
         // Run the bootstrap (from external .py file) + user script.
-        let bootstrap_src = include_str!("../python/pyronova/_bootstrap.py");
+        let bootstrap_src = include_str!("../../python/pyronova/_bootstrap.py");
         let bootstrap = format!("{bootstrap_src}\n# Execute full user script\n{script}");
 
         let globals =
@@ -2348,7 +2348,7 @@ fn worker_thread_loop_async(
         .join(", ");
 
     // Load async engine from external Python file (syntax highlighting + maintainability)
-    let engine_template = include_str!("../python/pyronova/_async_engine.py");
+    let engine_template = include_str!("../../python/pyronova/_async_engine.py");
     let engine_script =
         format!("WORKER_ID = {worker_idx}\nHANDLER_NAMES = [{handlers_array}]\n{engine_template}");
 

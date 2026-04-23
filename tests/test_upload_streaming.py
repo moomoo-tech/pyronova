@@ -1,6 +1,6 @@
 """Tests for `@app.post(..., stream=True)` upload streaming.
 
-Scope (matches v1 impl in src/body_stream.rs):
+Scope (matches v1 impl in src/python/body_stream.rs):
   * gil=True + sync handler only (registration should reject async / non-gil)
   * Iterator protocol: `for chunk in req.stream: ...` + `.read(n)`
   * max_body_size is still enforced for streaming routes

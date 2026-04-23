@@ -29,7 +29,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
 
 use crate::handlers::handle_request_tpc_inline;
-use crate::interp::SubInterpreterWorker;
+use crate::python::interp::SubInterpreterWorker;
 use crate::router::{FrozenRoutes, RouteTable};
 use crate::websocket;
 

@@ -19,7 +19,7 @@ use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
 
-use crate::interp;
+use crate::python::interp;
 use crate::response::{
     build_response, error_response, gateway_timeout_response, not_found_response,
     overloaded_response,

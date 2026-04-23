@@ -117,8 +117,8 @@ pub(crate) async fn handle_request(
         // Streaming path: spawn a feeder that pushes body frames into a
         // channel. The handler takes the receiver out via `req.stream`
         // on first access.
-        let (tx, rx) = tokio::sync::mpsc::channel::<crate::body_stream::ChunkMsg>(
-            crate::body_stream::CHANNEL_CAPACITY,
+        let (tx, rx) = tokio::sync::mpsc::channel::<crate::python::body_stream::ChunkMsg>(
+            crate::python::body_stream::CHANNEL_CAPACITY,
         );
         let cap = max_body_size();
         tokio::spawn(stream_body_feeder(body_obj, tx, cap));

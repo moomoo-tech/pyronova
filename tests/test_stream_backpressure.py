@@ -23,7 +23,7 @@ from pyronova.testing import TestClient
 
 
 def test_feeder_uses_bounded_async_channel():
-    src = pathlib.Path("src/body_stream.rs").read_text()
+    src = pathlib.Path("src/python/body_stream.rs").read_text()
     assert "tokio::sync::mpsc::Receiver" in src, (
         "BodyStream must hold a tokio bounded receiver; the previous "
         "std::sync::mpsc path was unbounded (OOM risk on large uploads)"

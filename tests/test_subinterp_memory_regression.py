@@ -469,7 +469,7 @@ def test_sustained_concurrent_load_no_leak(server):
     If this test fails:
       - First check `rebind_tstate_to_current_thread` is still called
         at the top of both worker_thread_loop and worker_thread_loop_async
-        in src/interp.rs.
+        in src/python/interp.rs.
       - Then run /tmp/pep684_repro/repro_threadstate_new.c to confirm
         the pure-C reproducer still shows 0 B/iter on the FRESH variant.
     """
@@ -504,6 +504,6 @@ def test_sustained_concurrent_load_no_leak(server):
         f"({completed} requests, ~{completed // 12} rps). "
         f"Expected < 15 MB. This almost certainly means the "
         f"rebind_tstate_to_current_thread fix has regressed — see "
-        f"src/interp.rs::rebind_tstate_to_current_thread and the test "
+        f"src/python/interp.rs::rebind_tstate_to_current_thread and the test "
         f"docstring for diagnosis steps."
     )

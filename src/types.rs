@@ -45,7 +45,7 @@ pub(crate) struct PyronovaRequest {
     /// keep `drop_in_place::<PyronovaRequest>` free of `_Py_Dealloc` — that
     /// would break `cargo test` linking for the pure-Rust unit tests.
     pub(crate) body_stream_rx:
-        Arc<std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<crate::body_stream::ChunkMsg>>>>,
+        Arc<std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<crate::python::body_stream::ChunkMsg>>>>,
     /// Cached parse of the query string. `form_urlencoded::parse + collect`
     /// costs ~100-200 ns for a two-param query and building a fresh
     /// Python dict on top is another ~500 ns. OnceLock matches the
@@ -153,12 +153,12 @@ impl PyronovaRequest {
     fn stream(
         &self,
         py: Python<'_>,
-    ) -> PyResult<Option<Py<crate::body_stream::PyronovaBodyStream>>> {
+    ) -> PyResult<Option<Py<crate::python::body_stream::PyronovaBodyStream>>> {
         let rx = { self.body_stream_rx.lock().unwrap().take() };
         match rx {
             Some(rx) => Ok(Some(Py::new(
                 py,
-                crate::body_stream::PyronovaBodyStream::new(rx),
+                crate::python::body_stream::PyronovaBodyStream::new(rx),
             )?)),
             None => Ok(None),
         }

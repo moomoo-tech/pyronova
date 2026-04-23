@@ -34,7 +34,7 @@ use tokio::runtime::Builder as RuntimeBuilder;
 use tokio::task::LocalSet;
 use tokio_util::sync::CancellationToken;
 
-use crate::interp::SubInterpreterWorker;
+use crate::python::interp::SubInterpreterWorker;
 use crate::router::{FrozenRoutes, RouteTable};
 use crate::tpc::{elevate_thread_qos_macos, tpc_accept_loop_inline, try_pin_current};
 
@@ -106,7 +106,7 @@ pub(crate) fn run_inmem_bench(
                 let local = LocalSet::new();
                 let mut worker = worker;
                 worker.tstate = unsafe {
-                    crate::interp::rebind_tstate_to_current_thread(worker.tstate)
+                    crate::python::interp::rebind_tstate_to_current_thread(worker.tstate)
                 };
                 let worker = std::rc::Rc::new(std::cell::RefCell::new(worker));
                 local.block_on(&rt, async move {
@@ -271,7 +271,7 @@ pub(crate) fn run_loopback_bench(
     // back to the client before server threads start accepting. Using
     // SO_REUSEPORT on this probe socket means the TPC worker threads
     // can bind the same port without EADDRINUSE.
-    let probe = crate::app::create_reuseport_listener("127.0.0.1:0".parse().unwrap())?;
+    let probe = crate::server::listener::create_reuseport_listener("127.0.0.1:0".parse().unwrap())?;
     let port = probe
         .local_addr()
         .map_err(|e| format!("local_addr: {e}"))?
@@ -312,7 +312,7 @@ pub(crate) fn run_loopback_bench(
                 let local = LocalSet::new();
                 let mut worker = worker;
                 worker.tstate =
-                    unsafe { crate::interp::rebind_tstate_to_current_thread(worker.tstate) };
+                    unsafe { crate::python::interp::rebind_tstate_to_current_thread(worker.tstate) };
                 let worker = std::rc::Rc::new(std::cell::RefCell::new(worker));
                 local.block_on(&rt, async move {
                     tpc_accept_loop_inline(
