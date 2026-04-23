@@ -50,6 +50,27 @@ pub(crate) enum ChunkMsg {
     Eof,
 }
 
+/// Standard shape for the per-request body-stream receiver: an Arc'd
+/// Mutex that holds `Some(Receiver)` until the handler takes it out
+/// with `.stream`, then holds `None`. For non-streaming routes the
+/// slot is permanently `None` — use [`empty_body_stream_rx`] to avoid
+/// allocating a fresh Mutex on every buffered request.
+pub(crate) type BodyStreamRx =
+    std::sync::Arc<std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<ChunkMsg>>>>;
+
+/// Shared empty body-stream slot for non-streaming routes. All handlers
+/// hold a clone of the same Arc; no writes ever target this slot (the
+/// only operation is `take()` on `None`, which is a no-op), so sharing
+/// is race-free. Saves one Arc + Mutex heap alloc per buffered request
+/// on the hot path.
+pub(crate) fn empty_body_stream_rx() -> BodyStreamRx {
+    use std::sync::OnceLock;
+    static EMPTY: OnceLock<BodyStreamRx> = OnceLock::new();
+    EMPTY
+        .get_or_init(|| std::sync::Arc::new(std::sync::Mutex::new(None)))
+        .clone()
+}
+
 /// Python-visible iterator over an incoming body's chunks.
 ///
 /// The receiver is wrapped in `Mutex<Option<...>>` so that:

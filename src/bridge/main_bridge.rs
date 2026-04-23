@@ -63,6 +63,12 @@ pub(crate) struct GilWorkItem {
     pub headers: HashMap<String, String>,
     pub client_ip: IpAddr,
     pub handler_idx: usize,
+    /// Body-stream receiver for `stream=True` routes. The feeder task
+    /// running on the TPC thread's LocalSet pushes body frames into
+    /// this receiver; the bridge thread's handler pulls them. Buffered
+    /// routes share the [`crate::python::body_stream::empty_body_stream_rx`]
+    /// singleton — `body` carries the collected bytes there.
+    pub body_stream_rx: crate::python::body_stream::BodyStreamRx,
     pub response_tx: oneshot::Sender<Result<BridgeResponse, String>>,
 }
 
@@ -84,18 +90,28 @@ impl MainInterpBridge {
         let (tx, mut rx) = mpsc::channel::<GilWorkItem>(capacity);
         let routes_owned = routes;
 
+        // The bridge thread intentionally does NOT spin up a tokio
+        // runtime. Python handlers on the main interp may call
+        // `req.stream.drain_count()` which internally calls
+        // `Receiver::blocking_recv` on the body-stream mpsc — and
+        // blocking_recv panics if invoked from an async runtime
+        // context. A plain std::thread with `rx.blocking_recv()` on
+        // the work channel keeps us outside of any runtime, so the
+        // downstream Python-side blocking_recv works correctly.
         std::thread::Builder::new()
             .name("pyronova-main-bridge".into())
             .spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("main bridge runtime");
-                rt.block_on(async move {
-                    while let Some(item) = rx.recv().await {
-                        dispatch_one(&routes_owned, item);
-                    }
-                });
+                loop {
+                    // `mpsc::Receiver::blocking_recv()` is the non-
+                    // runtime-bound counterpart to `.recv().await`.
+                    // Returns None when all Senders drop (server
+                    // shutdown), which is our exit signal.
+                    let item = match rx.blocking_recv() {
+                        Some(i) => i,
+                        None => break,
+                    };
+                    dispatch_one(&routes_owned, item);
+                }
                 tracing::info!(
                     target: "pyronova::server",
                     "main-interp bridge thread exiting (channel closed)"
@@ -140,6 +156,7 @@ fn dispatch_one(routes: &FrozenRoutes, item: GilWorkItem) {
         headers,
         client_ip,
         handler_idx,
+        body_stream_rx,
         response_tx,
     } = item;
 
@@ -164,8 +181,7 @@ fn dispatch_one(routes: &FrozenRoutes, item: GilWorkItem) {
         query_cache: OnceLock::new(),
         client_ip_addr: client_ip,
         body_bytes: body,
-        // Bridge path serves fully-buffered bodies; no streaming.
-        body_stream_rx: Arc::new(std::sync::Mutex::new(None)),
+        body_stream_rx,
     };
 
     let result = call_handler_with_hooks(routes.clone(), handler_idx, sky_req);

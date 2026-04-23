@@ -409,15 +409,15 @@ impl PyronovaApp {
         // test. Kernel SO_REUSEPORT + per-core current_thread runtime
         // + physical-core pinning + zero cross-thread handler dispatch
         // is a strict win for the common "sync handler" shape.
-        // After Phase 3+4+5 TPC covers:
-        //   gil=True     → main-interp bridge
-        //   async def    → sub-interp asyncio loop (inline, blocking)
-        //   stream=True  → main-interp bridge with stream response
-        //                  (already requires gil=True per route registration)
+        // After Phase 3+4+5 TPC covers every route shape:
+        //   gil=True        → main-interp bridge
+        //   async def       → sub-interp asyncio loop (inline, blocking)
+        //   response stream → main-interp bridge BridgeResponse::Stream
+        //   stream=True     → body feeder on TPC LocalSet, receiver
+        //                     forwarded to bridge via GilWorkItem.body_stream_rx
         //
-        // Nothing known to be TPC-incompatible as of v2.3 — we leave
-        // the escape hatch `PYRONOVA_TPC=0` alive as a safety valve
-        // for unforeseen bugs or niche C-extension loading issues.
+        // `PYRONOVA_TPC=0` remains as an escape hatch for unforeseen bugs
+        // or niche C-extension loading issues.
         let tpc_incompatible = false;
         let tpc_forced_off = matches!(
             std::env::var("PYRONOVA_TPC").ok().as_deref(),

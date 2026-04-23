@@ -29,7 +29,7 @@ use crate::types::extract_headers;
 
 use super::{
     apply_cors, build_fast_response, build_stream_response, collect_body_bounded, full_body,
-    BoxBody,
+    max_body_size, stream_body_feeder, BoxBody,
 };
 
 pub(crate) async fn handle_request_tpc_inline(
@@ -108,15 +108,39 @@ pub(crate) async fn handle_request_tpc_inline(
         }
     };
 
-    // Body collect (no streaming in TPC Phase 2 — enforced at startup).
-    let body_bytes = match collect_body_bounded(body_obj).await {
-        Ok(b) => b,
-        Err(resp) => {
-            let mut r = resp;
-            apply_cors(&mut r, routes.cors_config.as_ref());
-            return Ok(r);
-        }
-    };
+    // Body handling depends on the route's stream flag:
+    //   stream=True  → spawn a feeder task on this TPC thread's LocalSet
+    //                  so the handler can drain the mpsc receiver chunk
+    //                  by chunk. `body_bytes` stays empty. Route-
+    //                  registration layer already enforces stream=True
+    //                  implies gil=True, so this path feeds straight
+    //                  into the main-interp bridge below.
+    //   stream=False → collect the whole body with size + timeout
+    //                  limits before dispatch.
+    // Stream-route body handling. Route registration enforces
+    // `stream=True ⇒ gil=True`, so a streaming route is always dispatched
+    // through the main-interp bridge below — we build the mpsc receiver
+    // here (so the feeder can run on this TPC thread's LocalSet) and
+    // hand it to `GilWorkItem`. Non-stream routes skip all of this: the
+    // TPC inline hot path (sync + non-gil + non-stream) never touches
+    // `body_stream_rx` and pays no Arc::clone for a value it won't use.
+    let is_stream_route = routes.is_stream[handler_idx];
+    let (body_bytes, stream_rx): (Vec<u8>, Option<tokio::sync::mpsc::Receiver<crate::python::body_stream::ChunkMsg>>) =
+        if is_stream_route {
+            let (tx, rx) = tokio::sync::mpsc::channel::<crate::python::body_stream::ChunkMsg>(
+                crate::python::body_stream::CHANNEL_CAPACITY,
+            );
+            tokio::task::spawn_local(stream_body_feeder(body_obj, tx, max_body_size()));
+            (Vec::new(), Some(rx))
+        } else {
+            match collect_body_bounded(body_obj).await {
+                Ok(b) => (b, None),
+                Err(mut r) => {
+                    apply_cors(&mut r, routes.cors_config.as_ref());
+                    return Ok(r);
+                }
+            }
+        };
 
     let headers = extract_headers(&raw_headers);
 
@@ -144,6 +168,14 @@ pub(crate) async fn handle_request_tpc_inline(
             }
         };
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        // body_stream_rx materialized lazily: wrap the per-request
+        // receiver for streaming routes, fall back to the shared
+        // singleton for buffered gil routes. Non-gil TPC inline
+        // dispatch never runs this line — zero Arc::clone on that path.
+        let body_stream_rx = match stream_rx {
+            Some(rx) => std::sync::Arc::new(std::sync::Mutex::new(Some(rx))),
+            None => crate::python::body_stream::empty_body_stream_rx(),
+        };
         // Only here do we materialize owned strings — the bridge ships
         // the item cross-thread so it must outlive these stack locals.
         let item = crate::bridge::main_bridge::GilWorkItem {
@@ -155,6 +187,7 @@ pub(crate) async fn handle_request_tpc_inline(
             headers,
             client_ip: client_ip_addr,
             handler_idx,
+            body_stream_rx,
             response_tx,
         };
         if let Err((_dropped_item, err)) = bridge.try_dispatch(item) {
