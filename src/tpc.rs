@@ -30,8 +30,8 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::app::{create_reuseport_listener, handle_accept_error, setup_tcp_quickack};
-use crate::handlers::{handle_request, handle_request_subinterp};
-use crate::interp::InterpreterPool;
+use crate::handlers::{handle_request, handle_request_tpc_inline};
+use crate::interp::SubInterpreterWorker;
 use crate::router::FrozenRoutes;
 use crate::websocket;
 
@@ -261,17 +261,29 @@ async fn drive_gil_conn(
 // Sub-interpreter mode — dispatch still via the old pool for Phase 1
 // ---------------------------------------------------------------------------
 
+/// TPC inline mode (Phase 2) — each TPC thread owns its own sub-interp
+/// and executes handlers synchronously on the accept thread. No shared
+/// pool, no channel, no oneshot wake.
+///
+/// `workers` must have exactly `n_threads` entries; ownership transfers
+/// to the TPC threads. Constraint check: startup must have rejected any
+/// gil=True / async def / stream=True route — the inline handler has no
+/// path to handle those (see handle_request_tpc_inline).
 pub(crate) fn run_tpc_subinterp(
     addr: SocketAddr,
     n_threads: usize,
     n_cpus: usize,
-    pool: Arc<InterpreterPool>,
+    mut workers: Vec<SubInterpreterWorker>,
     routes: FrozenRoutes,
     tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
 ) -> Result<(), String> {
-    let has_async = routes.is_async.iter().any(|&a| a);
-    let mode = if has_async { "hybrid-async" } else { "hybrid" };
-    log_startup(mode, &addr, n_threads, n_cpus);
+    if workers.len() != n_threads {
+        return Err(format!(
+            "TPC worker count mismatch: expected {n_threads}, got {}",
+            workers.len()
+        ));
+    }
+    log_startup("hybrid-inline", &addr, n_threads, n_cpus);
 
     let shutdown = CancellationToken::new();
     let core_ids = core_affinity::get_core_ids().unwrap_or_default();
@@ -294,7 +306,7 @@ pub(crate) fn run_tpc_subinterp(
     let mut handles = Vec::with_capacity(n_threads);
     for i in 0..n_threads {
         let core_id = core_ids.get(i).copied();
-        let pool = Arc::clone(&pool);
+        let worker = workers.remove(0);
         let routes = Arc::clone(&routes);
         let shutdown = shutdown.clone();
         let tls = tls_acceptor.clone();
@@ -308,8 +320,16 @@ pub(crate) fn run_tpc_subinterp(
                     .build()
                     .expect("tpc current-thread runtime build");
                 let local = LocalSet::new();
+                // Rebind the sub-interp's tstate to THIS OS thread so
+                // PyEval_RestoreThread during call_handler targets it.
+                // Must happen on the TPC thread itself, not on main.
+                let mut worker = worker;
+                worker.tstate = unsafe {
+                    crate::interp::rebind_tstate_to_current_thread(worker.tstate)
+                };
+                let worker = std::rc::Rc::new(std::cell::RefCell::new(worker));
                 local.block_on(&rt, async move {
-                    tpc_accept_loop_subinterp(addr, pool, routes, shutdown, tls).await;
+                    tpc_accept_loop_inline(addr, worker, routes, shutdown, tls).await;
                 });
             })
             .map_err(|e| format!("spawn tpc-{i}: {e}"))?;
@@ -322,9 +342,9 @@ pub(crate) fn run_tpc_subinterp(
     Ok(())
 }
 
-async fn tpc_accept_loop_subinterp(
+async fn tpc_accept_loop_inline(
     addr: SocketAddr,
-    pool: Arc<InterpreterPool>,
+    worker: std::rc::Rc<std::cell::RefCell<SubInterpreterWorker>>,
     routes: FrozenRoutes,
     shutdown: CancellationToken,
     tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
@@ -355,12 +375,12 @@ async fn tpc_accept_loop_subinterp(
                         let _ = stream.set_nodelay(true);
                         setup_tcp_quickack(&stream);
 
-                        let pool = Arc::clone(&pool);
+                        let worker = std::rc::Rc::clone(&worker);
                         let routes = Arc::clone(&routes);
                         let conn_token = shutdown.clone();
                         let tls_acc_c = tls_acceptor.clone();
                         tracker.spawn_local(async move {
-                            drive_subinterp_conn(stream, remote_addr, pool, routes, conn_token, tls_acc_c).await;
+                            drive_inline_conn(stream, remote_addr, worker, routes, conn_token, tls_acc_c).await;
                         });
                     }
                     Err(e) => handle_accept_error(&e).await,
@@ -372,10 +392,10 @@ async fn tpc_accept_loop_subinterp(
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), tracker.wait()).await;
 }
 
-async fn drive_subinterp_conn(
+async fn drive_inline_conn(
     stream: tokio::net::TcpStream,
     remote_addr: SocketAddr,
-    pool: Arc<InterpreterPool>,
+    worker: std::rc::Rc<std::cell::RefCell<SubInterpreterWorker>>,
     routes: FrozenRoutes,
     conn_token: CancellationToken,
     tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
@@ -392,14 +412,14 @@ async fn drive_subinterp_conn(
     };
     let io = TokioIo::new(tls_stream);
     let svc = service_fn(move |req: Request<Incoming>| {
-        let pool = Arc::clone(&pool);
+        let worker = std::rc::Rc::clone(&worker);
         let routes = Arc::clone(&routes);
         let client_ip_addr = remote_addr.ip();
         async move {
             if websocket::is_websocket_upgrade(&req) {
                 websocket::handle_websocket(req, routes).await
             } else {
-                handle_request_subinterp(req, pool, routes, client_ip_addr).await
+                handle_request_tpc_inline(req, routes, worker, client_ip_addr).await
             }
         }
     });

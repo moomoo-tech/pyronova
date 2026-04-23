@@ -1019,20 +1019,38 @@ impl PyronovaApp {
         })
     }
 
-    /// TPC sub-interp entry — Phase 1 still dispatches to the old
-    /// InterpreterPool via `submit()`. Phase 2 replaces that with a
-    /// per-thread sub-interpreter owned by the TPC worker.
+    /// TPC sub-interp inline mode (Phase 2) — each TPC thread owns its
+    /// own sub-interp and runs handlers synchronously on the accept
+    /// thread. No pool, no channel, no oneshot wake.
+    ///
+    /// Phase 2 constraint: every route must be sync + non-GIL. Any
+    /// route with `gil=True`, `async def`, or `stream=True` causes this
+    /// to bail at startup with a clear error. Users with such routes
+    /// should stay on the old multi_thread path (drop `tpc=True`).
     #[allow(clippy::too_many_arguments)]
     fn run_tpc_subinterp(
         &self,
         py: Python<'_>,
         addr: SocketAddr,
-        workers: usize,
+        _workers: usize,
         io_workers: usize,
         num_cpus: usize,
         routes: FrozenRoutes,
         tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
     ) -> PyResult<()> {
+        // Reject unsupported route shapes before touching Python state.
+        let gil_count = routes.requires_gil.iter().filter(|&&g| g).count();
+        let async_count = routes.is_async.iter().filter(|&&a| a).count();
+        let stream_count = routes.is_stream.iter().filter(|&&s| s).count();
+        if gil_count > 0 || async_count > 0 || stream_count > 0 {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "TPC Phase 2 (inline) requires all routes to be sync + non-GIL + non-streaming. \
+                 Offenders: {gil_count} gil=True, {async_count} async def, {stream_count} stream=True. \
+                 Drop `tpc=True` / `PYRONOVA_TPC` to fall back to the multi-thread path, or rewrite \
+                 these routes as sync sub-interp handlers."
+            )));
+        }
+
         let script_path = if let Some(ref p) = self.script_path {
             p.clone()
         } else {
@@ -1040,47 +1058,46 @@ impl PyronovaApp {
             main_mod.getattr("__file__")?.extract::<String>()?
         };
 
-        let (
-            handler_names,
-            routers,
-            before_hook_names,
-            after_hook_names,
-            static_dirs,
-            requires_gil,
-        ) = (
-            routes.handler_names.clone(),
-            routes.routers.clone(),
-            routes.before_hook_names.clone(),
-            routes.after_hook_names.clone(),
-            routes.static_dirs.clone(),
-            routes.requires_gil.clone(),
-        );
+        // Combine handler + hook names — same pattern as InterpreterPool::new.
+        let mut all_func_names: Vec<String> = routes.handler_names.clone();
+        all_func_names.extend(routes.before_hook_names.iter().cloned());
+        all_func_names.extend(routes.after_hook_names.iter().cloned());
 
-        let pool = unsafe {
-            interp::InterpreterPool::new(
-                workers,
-                py,
-                &script_path,
-                &handler_names,
-                routers,
-                &before_hook_names,
-                &after_hook_names,
-                static_dirs,
-                requires_gil,
-                routes.is_async.clone(),
-                self.cors_config.clone(),
-                self.request_logging,
-            )
-            .map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "sub-interpreter pool error: {e}"
-                ))
-            })?
-        };
-        let pool = Arc::new(pool);
+        // PYRONOVA_WORKER=1 so sub-interps know they're replays.
+        std::env::set_var("PYRONOVA_WORKER", "1");
+
+        // Read the user script once.
+        let raw_script = std::fs::read_to_string(&script_path).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "read script '{script_path}': {e}"
+            ))
+        })?;
+
+        // Allocate a pool_id for this TPC server — still used by the
+        // C-FFI bridge's zombie guard (cheap compatibility).
+        let pool_id = interp::next_pool_id();
+
+        // Build N sub-interpreters on the MAIN thread (main tstate current).
+        // Each SubInterpreterWorker::new swaps to a fresh sub-interp, runs
+        // the bootstrap script, then swaps back. Returned workers have
+        // `tstate` saved (GIL released) — the TPC thread will rebind it
+        // via rebind_tstate_to_current_thread before use.
+        let n_threads = io_workers;
+        let mut workers = Vec::with_capacity(n_threads);
+        for i in 0..n_threads {
+            let w = unsafe {
+                interp::SubInterpreterWorker::new(&raw_script, &script_path, &all_func_names, pool_id)
+                    .map_err(|e| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "TPC sub-interp {i} init: {e}"
+                        ))
+                    })?
+            };
+            workers.push(w);
+        }
 
         py.detach(move || -> PyResult<()> {
-            crate::tpc::run_tpc_subinterp(addr, io_workers, num_cpus, pool, routes, tls_acceptor)
+            crate::tpc::run_tpc_subinterp(addr, n_threads, num_cpus, workers, routes, tls_acceptor)
                 .map_err(pyo3::exceptions::PyRuntimeError::new_err)
         })
     }

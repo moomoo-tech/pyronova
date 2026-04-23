@@ -20,6 +20,213 @@ use crate::types::{extract_headers, PyronovaRequest, PyronovaResponse, ResponseD
 
 type SharedPool = Arc<interp::InterpreterPool>;
 
+// ---------------------------------------------------------------------------
+// TPC inline handler — Phase 2
+// ---------------------------------------------------------------------------
+//
+// Replaces the `pool.submit() + oneshot.await` cross-thread hop with a
+// direct synchronous call into the TPC thread's own sub-interpreter.
+// Zero channels, zero cross-thread wakes. Kernel SO_REUSEPORT handles
+// load balance at the TCP layer; within a TPC thread, requests are
+// served strictly sequentially (slow handler ⇒ thread stalls, kernel
+// reshards new traffic to peer threads — by design).
+//
+// Startup enforces TPC constraints: all routes must be sync + non-GIL
+// + non-streaming. A route with `gil=True`, `async def`, or
+// `stream=True` makes PyronovaApp::run_tpc_subinterp refuse to start
+// with an explicit error (see src/app.rs::run_tpc_subinterp).
+//
+// Non-Send future by design: Rc<RefCell<SubInterpreterWorker>> pins
+// the worker to the calling OS thread, which is exactly what we need
+// for a current_thread runtime + LocalSet. Attempting to spawn this
+// future via `tokio::spawn` would fail to compile — a feature, not a
+// bug.
+
+pub(crate) async fn handle_request_tpc_inline(
+    req: Request<Incoming>,
+    routes: FrozenRoutes,
+    worker: std::rc::Rc<std::cell::RefCell<interp::SubInterpreterWorker>>,
+    client_ip_addr: std::net::IpAddr,
+) -> Result<Response<BoxBody>, hyper::Error> {
+    // gRPC short-circuit — fully handled in Rust, doesn't touch the sub-interp.
+    if crate::grpc::is_grpc_request(&req) {
+        return crate::grpc::handle_grpc(req).await;
+    }
+    crate::monitor::TOTAL_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let start = std::time::Instant::now();
+    let method: Arc<str> = Arc::from(req.method().as_str());
+    let uri = req.uri().clone();
+    let path: Arc<str> = Arc::from(uri.path());
+    let query = uri.query().unwrap_or("").to_string();
+
+    // Fast-path: pre-built response. Zero Python, served from Rust.
+    if !routes.fast_responses.is_empty() {
+        if let Some(fr) = routes
+            .fast_responses
+            .get(&(method.to_string(), path.to_string()))
+        {
+            return Ok(full_body(build_fast_response(
+                fr,
+                routes.cors_config.as_ref(),
+            )));
+        }
+    }
+
+    let raw_headers = req.headers().clone();
+    let accept_encoding = raw_headers
+        .get(hyper::header::ACCEPT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let body_obj = req.into_body();
+
+    // Router lookup.
+    let lookup = routes
+        .routers
+        .get(method.as_ref())
+        .and_then(|r| r.at(&path).ok())
+        .map(|m| {
+            let params: Vec<(String, String)> = m
+                .params
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            (*m.value, params)
+        });
+
+    // Static files — only on GET/HEAD miss.
+    if lookup.is_none() && (method.as_ref() == "GET" || method.as_ref() == "HEAD") {
+        if let Some(resp) = try_static_file(&path, &routes.static_dirs).await {
+            let mut r = full_body(resp);
+            apply_cors(&mut r, routes.cors_config.as_ref());
+            return Ok(r);
+        }
+    }
+
+    let (handler_idx, params) = match lookup {
+        Some(v) => v,
+        None => {
+            let mut r = full_body(not_found_response());
+            apply_cors(&mut r, routes.cors_config.as_ref());
+            return Ok(r);
+        }
+    };
+
+    // Body collect (no streaming in TPC Phase 2 — enforced at startup).
+    let body_bytes = match collect_body_bounded(body_obj).await {
+        Ok(b) => b,
+        Err(resp) => {
+            let mut r = resp;
+            apply_cors(&mut r, routes.cors_config.as_ref());
+            return Ok(r);
+        }
+    };
+
+    let headers = extract_headers(&raw_headers);
+    let method_log = Arc::clone(&method);
+    let path_log = Arc::clone(&path);
+    let handler_name = routes.handler_names[handler_idx].clone();
+
+    // The inline dispatch: acquire the TPC thread's sub-interp GIL,
+    // run the handler, release. Blocks the thread (which is the point —
+    // peer TPC threads continue serving via SO_REUSEPORT). Non-Send
+    // because Rc<RefCell<_>> and *mut PyThreadState cross no await.
+    let result = {
+        let mut worker_ref = worker.borrow_mut();
+        let tstate_cell = std::cell::Cell::new(worker_ref.tstate);
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            let _guard =
+                interp::SubInterpGilGuard::acquire(tstate_cell.get(), &tstate_cell);
+            worker_ref.call_handler(
+                &handler_name,
+                &routes.before_hook_names,
+                &routes.after_hook_names,
+                &method,
+                &path,
+                &params,
+                &query,
+                &body_bytes,
+                &headers,
+                &client_ip_addr.to_string(),
+            )
+        }));
+        worker_ref.tstate = tstate_cell.get();
+        match res {
+            Ok(r) => r,
+            Err(_) => Err("internal error: TPC handler panic".to_string()),
+        }
+    };
+
+    let mut http_resp = match result {
+        Ok(mut resp) => {
+            let ct_owned: String = resp.content_type.clone().unwrap_or_else(|| {
+                if resp.is_json
+                    || resp.body.starts_with(b"{")
+                    || resp.body.starts_with(b"[")
+                {
+                    "application/json".to_string()
+                } else {
+                    "text/plain; charset=utf-8".to_string()
+                }
+            });
+            crate::compression::maybe_compress_subinterp(
+                &mut resp.body,
+                &ct_owned,
+                &mut resp.headers,
+                &accept_encoding,
+            );
+            let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK);
+            let mut builder = Response::builder()
+                .status(status)
+                .header("content-type", &ct_owned)
+                .header("server", crate::response::SERVER_HEADER);
+            for (k, v) in &resp.headers {
+                builder = builder.header(k.as_str(), v.as_str());
+            }
+            match builder.body(Full::new(Bytes::from(resp.body))) {
+                Ok(r) => full_body(r),
+                Err(_) => full_body(error_response("invalid response headers")),
+            }
+        }
+        Err(e) => full_body(error_response(&e)),
+    };
+    apply_cors(&mut http_resp, routes.cors_config.as_ref());
+    let latency_us = start.elapsed().as_micros() as u64;
+    let status = http_resp.status().as_u16();
+    if routes.request_logging {
+        tracing::info!(
+            target: "pyronova::access",
+            method = %method_log,
+            path = %path_log,
+            status,
+            latency_us,
+            mode = "tpc-inline",
+            "PyronovaRequest handled"
+        );
+    }
+    Ok(http_resp)
+}
+
+/// Bounded body collection. Returns Err with a ready-made error response
+/// on oversize/stream errors.
+async fn collect_body_bounded(
+    body: Incoming,
+) -> Result<Vec<u8>, Response<BoxBody>> {
+    use http_body_util::Limited;
+    let max = max_body_size();
+    let limited = Limited::new(body, max);
+    match limited.collect().await {
+        Ok(c) => Ok(c.to_bytes().to_vec()),
+        Err(e) => {
+            if e.downcast_ref::<http_body_util::LengthLimitError>().is_some() {
+                Err(full_body(payload_too_large_response()))
+            } else {
+                Err(full_body(error_response("body read failed")))
+            }
+        }
+    }
+}
+
 /// Default max request body size (10 MB). Configurable via `app.max_body_size`.
 const DEFAULT_MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
 

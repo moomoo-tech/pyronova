@@ -41,6 +41,13 @@ struct WorkerState {
 /// `WorkerState::pool_id` and the guard in `pyronova_recv_cfunc`.
 static POOL_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
+/// Allocate a fresh pool id. Same counter the InterpreterPool uses, so
+/// TPC sub-interps get IDs distinct from any pool-owned sub-interps
+/// that might run in the same process.
+pub(crate) fn next_pool_id() -> u64 {
+    POOL_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
 /// Global registry of worker states, indexed by worker_id.
 ///
 /// Must support RE-INSTALLATION: a test suite or a hot-reload path may
@@ -821,9 +828,9 @@ impl WorkRequest {
 // Safe sub-interpreter
 // ---------------------------------------------------------------------------
 
-struct SubInterpreterWorker {
+pub(crate) struct SubInterpreterWorker {
     /// Thread state (saved after releasing GIL)
-    tstate: *mut ffi::PyThreadState,
+    pub(crate) tstate: *mut ffi::PyThreadState,
     /// Handler function pointers keyed by name
     handlers: HashMap<String, *mut ffi::PyObject>,
     /// Globals dict of this sub-interpreter
@@ -856,7 +863,7 @@ impl SubInterpreterWorker {
     /// # Safety
     /// Must be called while the main interpreter's thread state is current.
     /// Switches to the new sub-interpreter and back to main on completion.
-    unsafe fn new(
+    pub(crate) unsafe fn new(
         script: &str,
         script_path: &str,
         func_names: &[String],
@@ -1564,7 +1571,7 @@ def _attach_pyronova_request_helpers(t):\n    from urllib.parse import parse_qs\
     /// # Safety
     /// Must be called with this sub-interpreter's GIL held.
     #[allow(clippy::too_many_arguments)]
-    unsafe fn call_handler(
+    pub(crate) unsafe fn call_handler(
         &mut self,
         handler_name: &str,
         before_hook_names: &[String],
@@ -2043,14 +2050,14 @@ impl InterpreterPool {
 ///
 /// The saved thread state is written back to `tstate_cell` on drop, so the caller
 /// can retrieve it even after a panic unwind.
-struct SubInterpGilGuard<'a> {
+pub(crate) struct SubInterpGilGuard<'a> {
     tstate_cell: &'a std::cell::Cell<*mut ffi::PyThreadState>,
 }
 
 impl<'a> SubInterpGilGuard<'a> {
     /// Acquire the sub-interpreter's GIL. On drop, releases it and writes
     /// the saved tstate back to `tstate_cell`.
-    unsafe fn acquire(
+    pub(crate) unsafe fn acquire(
         tstate: *mut ffi::PyThreadState,
         tstate_cell: &'a std::cell::Cell<*mut ffi::PyThreadState>,
     ) -> Self {
@@ -2106,7 +2113,7 @@ impl Drop for SubInterpGilGuard<'_> {
 ///
 /// See docs/memory-leak-investigation-2026-04-19.md and
 /// /tmp/pep684_repro/repro_threadstate_new.c for the bisection.
-unsafe fn rebind_tstate_to_current_thread(
+pub(crate) unsafe fn rebind_tstate_to_current_thread(
     creator_tstate: *mut ffi::PyThreadState,
 ) -> *mut ffi::PyThreadState {
     // Attach creator tstate so we can call PyThreadState_New.
