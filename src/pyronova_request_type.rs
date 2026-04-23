@@ -115,6 +115,13 @@ pub fn slot_rc_report() -> String {
 pub(crate) struct LazyMaps {
     pub params: Vec<(String, String)>,
     pub headers: HashMap<String, String>,
+    /// Request body as raw Rust-owned bytes. Lazily materialized to a
+    /// PyBytes on first access to `req.body_bytes`. For simple handlers
+    /// (and nearly all plaintext/JSON benchmarks) the body is never read
+    /// and we skip a potentially-megabyte PyBytes_FromStringAndSize
+    /// copy entirely. Quant/AI workloads that DO read the body pay the
+    /// copy once, same wall-clock as the old eager path.
+    pub body: Vec<u8>,
 }
 
 // ---------------------------------------------------------------------------
@@ -136,10 +143,12 @@ pub(crate) struct RequestInner {
     pub method: *mut ffi::PyObject,
     pub path: *mut ffi::PyObject,
     pub query: *mut ffi::PyObject,
-    pub body_bytes: *mut ffi::PyObject,
     pub client_ip: *mut ffi::PyObject,
     pub params_cache: *mut ffi::PyObject,
     pub headers_cache: *mut ffi::PyObject,
+    /// Lazy PyBytes cache for the request body. Starts null; filled by
+    /// `get_body_bytes` on first access by copying `LazyMaps.body`.
+    pub body_bytes_cache: *mut ffi::PyObject,
     /// Non-null when built via `alloc_and_init_lazy`. Dropped via
     /// `Box::from_raw` in dealloc. Null when built via `tp_init`
     /// (Python-side _Request(...)) — in that case caches are
@@ -168,7 +177,7 @@ unsafe extern "C" fn pyronova_request_dealloc(obj: *mut ffi::PyObject) {
         record_slot_rc(1, (*inner).path);
         record_slot_rc(2, (*inner).params_cache);
         record_slot_rc(3, (*inner).query);
-        record_slot_rc(4, (*inner).body_bytes);
+        record_slot_rc(4, (*inner).body_bytes_cache);
         record_slot_rc(5, (*inner).headers_cache);
         record_slot_rc(6, (*inner).client_ip);
     }
@@ -176,10 +185,10 @@ unsafe extern "C" fn pyronova_request_dealloc(obj: *mut ffi::PyObject) {
     ffi::Py_XDECREF((*inner).method);
     ffi::Py_XDECREF((*inner).path);
     ffi::Py_XDECREF((*inner).query);
-    ffi::Py_XDECREF((*inner).body_bytes);
     ffi::Py_XDECREF((*inner).client_ip);
     ffi::Py_XDECREF((*inner).params_cache);
     ffi::Py_XDECREF((*inner).headers_cache);
+    ffi::Py_XDECREF((*inner).body_bytes_cache);
 
     if !(*inner).lazy_maps.is_null() {
         // Reclaim the Box — its Drop frees the String/HashMap data.
@@ -237,7 +246,7 @@ unsafe extern "C" fn pyronova_request_init(
     let old_path = (*inner).path;
     let old_params_cache = (*inner).params_cache;
     let old_query = (*inner).query;
-    let old_body = (*inner).body_bytes;
+    let old_body_cache = (*inner).body_bytes_cache;
     let old_headers_cache = (*inner).headers_cache;
     let old_client_ip = (*inner).client_ip;
 
@@ -245,7 +254,7 @@ unsafe extern "C" fn pyronova_request_init(
     (*inner).path = path;
     (*inner).params_cache = params;
     (*inner).query = query;
-    (*inner).body_bytes = body_bytes;
+    (*inner).body_bytes_cache = body_bytes;
     (*inner).headers_cache = headers;
     (*inner).client_ip = client_ip;
 
@@ -260,7 +269,7 @@ unsafe extern "C" fn pyronova_request_init(
     ffi::Py_XDECREF(old_path);
     ffi::Py_XDECREF(old_params_cache);
     ffi::Py_XDECREF(old_query);
-    ffi::Py_XDECREF(old_body);
+    ffi::Py_XDECREF(old_body_cache);
     ffi::Py_XDECREF(old_headers_cache);
     ffi::Py_XDECREF(old_client_ip);
     0
@@ -385,39 +394,44 @@ unsafe extern "C" fn get_headers(
     built
 }
 
-// Setters: allow `req.headers = ...` / `req.params = ...` — swaps the
-// cache slot. Rarely used but keeps the attribute writable for tests
-// / monkey-patching parity with the old PyMemberDef path (which was
-// READONLY — tightening now would break handlers that assign).
-unsafe extern "C" fn set_params(
+unsafe extern "C" fn get_body_bytes(
     obj: *mut ffi::PyObject,
-    value: *mut ffi::PyObject,
     _closure: *mut c_void,
-) -> c_int {
+) -> *mut ffi::PyObject {
     let inner = obj as *mut RequestInner;
-    if !value.is_null() {
-        ffi::Py_INCREF(value);
+    if !(*inner).body_bytes_cache.is_null() {
+        let p = (*inner).body_bytes_cache;
+        ffi::Py_INCREF(p);
+        return p;
     }
-    let old = (*inner).params_cache;
-    (*inner).params_cache = value;
-    ffi::Py_XDECREF(old);
-    0
+    // Build PyBytes from the raw body bytes stored in lazy_maps. Handlers
+    // that never touch `req.body_bytes` (plaintext/JSON simple responders
+    // that return a literal) skip this memcpy entirely — worthwhile when
+    // the body is multi-megabyte (AI agent payloads, file uploads).
+    let built = if !(*inner).lazy_maps.is_null() {
+        let body = &(*(*inner).lazy_maps).body;
+        ffi::PyBytes_FromStringAndSize(
+            body.as_ptr() as *const c_char,
+            body.len() as ffi::Py_ssize_t,
+        )
+    } else {
+        // tp_init path without a body supplied: return empty bytes.
+        ffi::PyBytes_FromStringAndSize(std::ptr::null(), 0)
+    };
+    if built.is_null() {
+        return std::ptr::null_mut();
+    }
+    (*inner).body_bytes_cache = built;
+    ffi::Py_INCREF(built);
+    built
 }
 
-unsafe extern "C" fn set_headers(
-    obj: *mut ffi::PyObject,
-    value: *mut ffi::PyObject,
-    _closure: *mut c_void,
-) -> c_int {
-    let inner = obj as *mut RequestInner;
-    if !value.is_null() {
-        ffi::Py_INCREF(value);
-    }
-    let old = (*inner).headers_cache;
-    (*inner).headers_cache = value;
-    ffi::Py_XDECREF(old);
-    0
-}
+// Intentionally NO setters: `params` and `headers` stay READONLY, matching
+// the semantics of the pre-lazy PyMemberDef path (flags = Py_READONLY).
+// Handler code that needed to mutate should use a local dict. Tightening
+// this also removes a concurrency-style footgun — sub-interp workers
+// processing batched requests could otherwise end up with another task's
+// cache slot values.
 
 // --- PyMemberDef table (eager slots only) -------------------------------
 
@@ -427,10 +441,9 @@ const TYPE_OBJECT_EX: c_int = ffi::Py_T_OBJECT_EX;
 static MEMBER_NAME_METHOD: &[u8] = b"method\0";
 static MEMBER_NAME_PATH: &[u8] = b"path\0";
 static MEMBER_NAME_QUERY: &[u8] = b"query\0";
-static MEMBER_NAME_BODY_BYTES: &[u8] = b"body_bytes\0";
 static MEMBER_NAME_CLIENT_IP: &[u8] = b"client_ip\0";
 
-fn members_table() -> [ffi::PyMemberDef; 6] {
+fn members_table() -> [ffi::PyMemberDef; 5] {
     use std::mem::offset_of;
     [
         ffi::PyMemberDef {
@@ -455,13 +468,6 @@ fn members_table() -> [ffi::PyMemberDef; 6] {
             doc: std::ptr::null(),
         },
         ffi::PyMemberDef {
-            name: MEMBER_NAME_BODY_BYTES.as_ptr() as *const c_char,
-            type_code: TYPE_OBJECT_EX,
-            offset: offset_of!(RequestInner, body_bytes) as ffi::Py_ssize_t,
-            flags: READONLY,
-            doc: std::ptr::null(),
-        },
-        ffi::PyMemberDef {
             name: MEMBER_NAME_CLIENT_IP.as_ptr() as *const c_char,
             type_code: TYPE_OBJECT_EX,
             offset: offset_of!(RequestInner, client_ip) as ffi::Py_ssize_t,
@@ -482,20 +488,28 @@ fn members_table() -> [ffi::PyMemberDef; 6] {
 
 static GETSET_NAME_PARAMS: &[u8] = b"params\0";
 static GETSET_NAME_HEADERS: &[u8] = b"headers\0";
+static GETSET_NAME_BODY_BYTES: &[u8] = b"body_bytes\0";
 
-fn getset_table() -> [ffi::PyGetSetDef; 3] {
+fn getset_table() -> [ffi::PyGetSetDef; 4] {
     [
         ffi::PyGetSetDef {
             name: GETSET_NAME_PARAMS.as_ptr() as *const c_char,
             get: Some(get_params),
-            set: Some(set_params),
+            set: None,
             doc: std::ptr::null(),
             closure: std::ptr::null_mut(),
         },
         ffi::PyGetSetDef {
             name: GETSET_NAME_HEADERS.as_ptr() as *const c_char,
             get: Some(get_headers),
-            set: Some(set_headers),
+            set: None,
+            doc: std::ptr::null(),
+            closure: std::ptr::null_mut(),
+        },
+        ffi::PyGetSetDef {
+            name: GETSET_NAME_BODY_BYTES.as_ptr() as *const c_char,
+            get: Some(get_body_bytes),
+            set: None,
             doc: std::ptr::null(),
             closure: std::ptr::null_mut(),
         },
@@ -595,10 +609,10 @@ pub(crate) unsafe fn alloc_and_init(
     (*inner).method = method;
     (*inner).path = path;
     (*inner).query = query;
-    (*inner).body_bytes = body_bytes;
     (*inner).client_ip = client_ip;
     (*inner).params_cache = params;
     (*inner).headers_cache = headers;
+    (*inner).body_bytes_cache = body_bytes;
     (*inner).lazy_maps = std::ptr::null_mut();
     Ok(obj)
 }
@@ -621,7 +635,6 @@ pub(crate) unsafe fn alloc_and_init_lazy(
     method: *mut ffi::PyObject,
     path: *mut ffi::PyObject,
     query: *mut ffi::PyObject,
-    body_bytes: *mut ffi::PyObject,
     client_ip: *mut ffi::PyObject,
     maps: Box<LazyMaps>,
 ) -> Result<*mut ffi::PyObject, String> {
@@ -633,7 +646,6 @@ pub(crate) unsafe fn alloc_and_init_lazy(
         ffi::Py_XDECREF(method);
         ffi::Py_XDECREF(path);
         ffi::Py_XDECREF(query);
-        ffi::Py_XDECREF(body_bytes);
         ffi::Py_XDECREF(client_ip);
         drop(maps);
         return Err("PyType_GenericAlloc(_Request) failed".to_string());
@@ -642,10 +654,10 @@ pub(crate) unsafe fn alloc_and_init_lazy(
     (*inner).method = method;
     (*inner).path = path;
     (*inner).query = query;
-    (*inner).body_bytes = body_bytes;
     (*inner).client_ip = client_ip;
     (*inner).params_cache = std::ptr::null_mut();
     (*inner).headers_cache = std::ptr::null_mut();
+    (*inner).body_bytes_cache = std::ptr::null_mut();
     (*inner).lazy_maps = Box::into_raw(maps);
     Ok(obj)
 }

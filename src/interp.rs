@@ -1221,11 +1221,6 @@ def _attach_pyronova_request_helpers(t):\n    from urllib.parse import parse_qs\
         } else {
             py_str(query).ok_or("failed to create py_query")?
         };
-        let py_body = if skip("body") {
-            none_ref()
-        } else {
-            py_bytes(body).ok_or("failed to create py_body")?
-        };
         let py_client_ip = if skip("client_ip") {
             none_ref()
         } else {
@@ -1247,6 +1242,7 @@ def _attach_pyronova_request_helpers(t):\n    from urllib.parse import parse_qs\
         // (now empty) dict, preserving the old observation surface.
         let skip_params = skip("params");
         let skip_headers = skip("headers");
+        let skip_body = skip("body");
         let maps = Box::new(crate::pyronova_request_type::LazyMaps {
             params: if skip_params {
                 Vec::new()
@@ -1258,6 +1254,11 @@ def _attach_pyronova_request_helpers(t):\n    from urllib.parse import parse_qs\
             } else {
                 headers.clone()
             },
+            body: if skip_body {
+                Vec::new()
+            } else {
+                body.to_vec()
+            },
         });
 
         // Transfer ownership of each new ref into the instance.
@@ -1267,7 +1268,6 @@ def _attach_pyronova_request_helpers(t):\n    from urllib.parse import parse_qs\
             py_method.into_raw(),
             py_path.into_raw(),
             py_query.into_raw(),
-            py_body.into_raw(),
             py_client_ip.into_raw(),
             maps,
         )
@@ -1832,26 +1832,20 @@ def _attach_pyronova_request_helpers(t):\n    from urllib.parse import parse_qs\
         if self.gc_threshold > 0 && !self.gc_collect_func.is_null() {
             self.gc_counter = self.gc_counter.wrapping_add(1);
             if self.gc_counter.is_multiple_of(self.gc_threshold) {
-                // Empty args tuple — gc.collect() with no args does a
-                // full collection across all generations. Cheap when
-                // there are few cycles, which is the common case under
-                // our ref-count-first request lifecycle.
-                let args = ffi::PyTuple_New(0);
-                if !args.is_null() {
-                    let res = ffi::PyObject_Call(
-                        self.gc_collect_func,
-                        args,
-                        std::ptr::null_mut(),
-                    );
-                    ffi::Py_DECREF(args);
-                    if !res.is_null() {
-                        ffi::Py_DECREF(res);
-                    } else {
-                        // Clear any exception raised during the collect
-                        // so we don't leak it into the handler's return
-                        // path (handler already succeeded).
-                        ffi::PyErr_Clear();
-                    }
+                // `PyObject_CallNoArgs` skips the empty-tuple alloc that
+                // `PyObject_Call` would require; saves a small per-tick
+                // cost and is the idiomatic 3.9+ invocation. `gc.collect()`
+                // with no args = full 3-generation collection — cheap
+                // when there are few cycles, which is the common case
+                // under our ref-count-first request lifecycle.
+                let res = ffi::PyObject_CallNoArgs(self.gc_collect_func);
+                if !res.is_null() {
+                    ffi::Py_DECREF(res);
+                } else {
+                    // Clear any exception raised during the collect so
+                    // we don't leak it into the handler's return path
+                    // (handler already succeeded).
+                    ffi::PyErr_Clear();
                 }
             }
         }

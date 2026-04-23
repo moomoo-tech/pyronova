@@ -399,15 +399,13 @@ fn fire_gc(worker: &std::rc::Rc<std::cell::RefCell<SubInterpreterWorker>>) {
     let tstate_cell = std::cell::Cell::new(w.tstate);
     unsafe {
         let _guard = crate::interp::SubInterpGilGuard::acquire(tstate_cell.get(), &tstate_cell);
-        let args = ffi::PyTuple_New(0);
-        if !args.is_null() {
-            let res = ffi::PyObject_Call(w.gc_collect_func, args, std::ptr::null_mut());
-            ffi::Py_DECREF(args);
-            if !res.is_null() {
-                ffi::Py_DECREF(res);
-            } else {
-                ffi::PyErr_Clear();
-            }
+        // PyObject_CallNoArgs: skip the empty-tuple alloc the generic
+        // PyObject_Call path requires. Idiomatic 3.9+ invocation.
+        let res = ffi::PyObject_CallNoArgs(w.gc_collect_func);
+        if !res.is_null() {
+            ffi::Py_DECREF(res);
+        } else {
+            ffi::PyErr_Clear();
         }
     }
     w.tstate = tstate_cell.get();
