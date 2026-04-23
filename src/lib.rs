@@ -2,6 +2,7 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod app;
+mod bench;
 mod body_stream;
 mod compression;
 mod db;

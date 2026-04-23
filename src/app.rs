@@ -1336,7 +1336,7 @@ impl PyronovaApp {
         }
 
         py.detach(move || -> PyResult<(u64, f64)> {
-            crate::tpc::run_inmem_bench(
+            crate::bench::run_inmem_bench(
                 n_threads,
                 conns_per_worker,
                 duration_s,
@@ -1430,7 +1430,7 @@ impl PyronovaApp {
         }
 
         py.detach(move || -> PyResult<(u64, f64, u16)> {
-            crate::tpc::run_loopback_bench(
+            crate::bench::run_loopback_bench(
                 n_threads,
                 client_conns,
                 duration_s,
