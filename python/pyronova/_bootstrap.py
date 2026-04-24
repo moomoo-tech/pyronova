@@ -166,6 +166,14 @@ _mock_pyron.SharedState = _mock_engine.SharedState
 _mock_pyron.Stream = _mock_engine.Stream
 _mock_pyron.get_gil_metrics = _mock_engine.get_gil_metrics
 def _redirect(url, status_code=302):
+    # Mirror pyronova.__init__.redirect's CRLF guard so sub-interp mode
+    # has the same HTTP Response Splitting defence as GIL mode.
+    for _ch in ("\r", "\n", "\0"):
+        if _ch in url:
+            raise ValueError(
+                f"redirect url contains forbidden control character "
+                f"{_ch!r}; refusing to emit (HTTP response splitting risk)"
+            )
     return _Response(body="", status_code=status_code, headers={"location": url})
 _mock_pyron.redirect = _redirect
 
@@ -326,6 +334,7 @@ def _set_cookie(resp, name, value, **kw):
     _reject_cookie_crlf("value", value)
     _reject_cookie_crlf("path", kw.get("path"))
     _reject_cookie_crlf("domain", kw.get("domain"))
+    _reject_cookie_crlf("samesite", kw.get("samesite"))
     parts = [f"{name}={value}"]
     if kw.get("max_age") is not None: parts.append(f"Max-Age={kw['max_age']}")
     if kw.get("path", "/"): parts.append(f"Path={kw.get('path','/')}")

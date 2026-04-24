@@ -91,6 +91,8 @@ def set_cookie(
         _reject_control_chars("path", path)
     if expires is not None:
         _reject_control_chars("expires", expires)
+    if samesite is not None:
+        _reject_control_chars("samesite", samesite)
 
     parts = [f"{name}={value}"]
     if max_age is not None:

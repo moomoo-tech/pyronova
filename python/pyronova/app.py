@@ -387,6 +387,21 @@ class Pyronova:
         if isinstance(expose_headers, list):
             expose_headers = ", ".join(expose_headers)
 
+        # W3C CORS spec forbids `Access-Control-Allow-Origin: *` together
+        # with `Access-Control-Allow-Credentials: true` — browsers silently
+        # drop credentials when this pair is emitted, turning the
+        # misconfiguration into an invisible auth outage. Fail loudly at
+        # enable_cors time instead of shipping a broken preflight.
+        if allow_credentials and any(
+            o.strip() == "*" for o in allow_origins.split(",")
+        ):
+            raise ValueError(
+                "CORS: allow_origins='*' is incompatible with "
+                "allow_credentials=True. W3C spec forbids this pair — "
+                "browsers drop credentials silently. Specify explicit "
+                "origins, or set allow_credentials=False."
+            )
+
         cors_headers = {
             "access-control-allow-origin": allow_origins,
             "access-control-allow-methods": allow_methods,

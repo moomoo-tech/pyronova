@@ -57,7 +57,7 @@ use crate::db::{bind_params_raw, column_to_py, extract_param, pool_ref, row_to_d
 /// The caller is responsible for releasing the GIL (via `py.detach`)
 /// around this call so peer sub-interpreters can make progress while
 /// we wait.
-fn run_on_db_rt<F, T>(fut: F) -> T
+fn run_on_db_rt<F, T>(fut: F) -> Result<T, &'static str>
 where
     F: std::future::Future<Output = T> + Send + 'static,
     T: Send + 'static,
@@ -65,15 +65,16 @@ where
     let rt = runtime();
     let (tx, rx) = std::sync::mpsc::sync_channel::<T>(1);
     rt.spawn(async move {
-        // Channel recv can only fail if the sender is dropped without
-        // sending, which happens only if this spawned task panics. Use
-        // `let _ = ...` so a panic here doesn't double-panic the
-        // runtime — the caller's `rx.recv()` will see the dropped
-        // sender and return Err.
+        // `let _ = ...` so a panic in fut.await doesn't double-panic the
+        // runtime. If the spawned task panics the sender drops unsent,
+        // the recv below sees Err, and we surface it as a Python
+        // exception (NOT .expect() — this is called inside an extern "C"
+        // cfunc and Rust 1.81+ aborts the process on an unwind across
+        // the FFI boundary).
         let _ = tx.send(fut.await);
     });
     rx.recv()
-        .expect("pyronova-db runtime task dropped without sending a result")
+        .map_err(|_| "pyronova-db runtime task panicked (spawned future did not complete)")
 }
 
 // ---------------------------------------------------------------------------
@@ -166,6 +167,7 @@ pub(crate) unsafe extern "C" fn pyronova_db_fetch_all_cfunc(
                     bind_params_raw(q, &params).fetch_all(pool).await
                 })
             })
+            .map_err(|e| PyRuntimeError::new_err(format!("db fetch_all runtime: {e}")))?
             .map_err(|e| PyRuntimeError::new_err(format!("db fetch_all: {e}")))?;
 
         let list = PyList::empty(py);
@@ -196,6 +198,7 @@ pub(crate) unsafe extern "C" fn pyronova_db_fetch_one_cfunc(
                     bind_params_raw(q, &params).fetch_optional(pool).await
                 })
             })
+            .map_err(|e| PyRuntimeError::new_err(format!("db fetch_one runtime: {e}")))?
             .map_err(|e| PyRuntimeError::new_err(format!("db fetch_one: {e}")))?;
 
         match row_opt {
@@ -225,6 +228,7 @@ pub(crate) unsafe extern "C" fn pyronova_db_fetch_scalar_cfunc(
                     bind_params_raw(q, &params).fetch_optional(pool).await
                 })
             })
+            .map_err(|e| PyRuntimeError::new_err(format!("db fetch_scalar runtime: {e}")))?
             .map_err(|e| PyRuntimeError::new_err(format!("db fetch_scalar: {e}")))?;
 
         let Some(row) = row_opt else {
@@ -256,6 +260,7 @@ pub(crate) unsafe extern "C" fn pyronova_db_execute_cfunc(
                     bind_params_raw(q, &params).execute(pool).await
                 })
             })
+            .map_err(|e| PyRuntimeError::new_err(format!("db execute runtime: {e}")))?
             .map_err(|e| PyRuntimeError::new_err(format!("db execute: {e}")))?;
         let affected = result.rows_affected() as i64;
         Ok(affected

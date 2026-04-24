@@ -21,6 +21,15 @@ def redirect(url: str, status_code: int = 302) -> Response:
         def moved(req):
             return redirect("/new-home", status_code=301)
     """
+    # Reject CR/LF/NUL — the same HTTP Response Splitting class of attack
+    # the cookie helpers defend against. Open-redirect (scheme/host
+    # allow-list) is left to the caller; we only block header injection.
+    for _ch in ("\r", "\n", "\0"):
+        if _ch in url:
+            raise ValueError(
+                f"redirect url contains forbidden control character "
+                f"{_ch!r}; refusing to emit (HTTP response splitting risk)"
+            )
     return Response(
         body="",
         status_code=status_code,

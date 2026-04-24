@@ -840,8 +840,13 @@ impl PyronovaApp {
         println!("  Listening on {scheme}://{addr}");
         println!("  Sub-interpreters: {workers} | IO threads: {io_workers} (CPUs: {num_cpus})");
         if has_async {
-            let sync_w = workers - (workers / 2).max(2);
-            let async_w = (workers / 2).max(2);
+            // Cap async at workers-1 so sync always keeps at least one
+            // slot; on tiny pools (workers<=2) async gets 1, sync gets
+            // the rest. Plain subtraction here panics on usize underflow
+            // in debug builds and wraps to garbage in release builds
+            // when workers < 2.
+            let async_w = (workers / 2).max(2).min(workers.saturating_sub(1).max(1));
+            let sync_w = workers.saturating_sub(async_w);
             println!("  Workers: {sync_w} sync + {async_w} async");
         }
         println!(
