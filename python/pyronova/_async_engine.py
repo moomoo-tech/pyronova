@@ -84,14 +84,20 @@ async def _process_request(req_id, handler_idx, method, path, params, query, bod
             )
             _pyronova_send(WORKER_ID, _pyronova_pool_id, req_id, 200, ct, body)
     except asyncio.TimeoutError:
-        _pyronova_send(WORKER_ID, _pyronova_pool_id, req_id, 504, "text/plain", b"handler timeout")
+        try:
+            _pyronova_send(WORKER_ID, _pyronova_pool_id, req_id, 504, "text/plain", b"handler timeout")
+        except Exception:
+            _log.exception("async handler req_id=%s: send timeout response failed", req_id)
     except asyncio.CancelledError:
         # Propagated cancellation — client disconnected or Rust future dropped.
         # Don't send response; the oneshot receiver is already gone.
         pass
     except Exception:
         _log.exception("async handler req_id=%s path=%s raised", req_id, path)
-        _pyronova_send(WORKER_ID, _pyronova_pool_id, req_id, 500, "text/plain", b"internal server error")
+        try:
+            _pyronova_send(WORKER_ID, _pyronova_pool_id, req_id, 500, "text/plain", b"internal server error")
+        except Exception:
+            _log.exception("async handler req_id=%s: send error response failed", req_id)
 
 
 def _fetcher_thread(loop):

@@ -180,7 +180,7 @@ pub(crate) fn run_tpc_gil(
     for i in 0..n_threads {
         let core_id = core_ids.get(i).copied();
         let routes = Arc::clone(&routes);
-        let shutdown = shutdown.clone();
+        let shutdown_thread = shutdown.clone();
         let tls = tls_acceptor.clone();
 
         let handle = std::thread::Builder::new()
@@ -194,15 +194,25 @@ pub(crate) fn run_tpc_gil(
                     .expect("tpc current-thread runtime build");
                 let local = LocalSet::new();
                 local.block_on(&rt, async move {
-                    tpc_accept_loop_gil(addr, routes, shutdown, tls).await;
+                    tpc_accept_loop_gil(addr, routes, shutdown_thread, tls).await;
                 });
-            })
-            .map_err(|e| format!("spawn tpc-{i}: {e}"))?;
-        handles.push(handle);
+            });
+        match handle {
+            Ok(h) => handles.push(h),
+            Err(e) => {
+                shutdown.cancel();
+                return Err(format!("spawn tpc-{i}: {e}"));
+            }
+        }
     }
 
     for h in handles {
-        let _ = h.join();
+        if let Err(e) = h.join() {
+            let msg = e.downcast_ref::<String>().map(|s| s.as_str())
+                .or_else(|| e.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown panic");
+            tracing::error!(target: "pyronova::server", panic = msg, "TPC GIL worker thread panicked");
+        }
     }
     Ok(())
 }
@@ -440,6 +450,7 @@ fn run_tpc_subinterp_per_thread_listener(
         let tls = tls_acceptor.clone();
 
         let bridge = main_bridge.clone();
+        let shutdown_thread = shutdown.clone();
         let handle = std::thread::Builder::new()
             .name(format!("pyronova-tpc-{i}"))
             .spawn(move || {
@@ -464,19 +475,29 @@ fn run_tpc_subinterp_per_thread_listener(
                         worker,
                         routes_static,
                         routes_arc,
-                        shutdown,
+                        shutdown_thread,
                         tls,
                         bridge,
                     )
                     .await;
                 });
-            })
-            .map_err(|e| format!("spawn tpc-{i}: {e}"))?;
-        handles.push(handle);
+            });
+        match handle {
+            Ok(h) => handles.push(h),
+            Err(e) => {
+                shutdown.cancel();
+                return Err(format!("spawn tpc-{i}: {e}"));
+            }
+        }
     }
 
     for h in handles {
-        let _ = h.join();
+        if let Err(e) = h.join() {
+            let msg = e.downcast_ref::<String>().map(|s| s.as_str())
+                .or_else(|| e.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown panic");
+            tracing::error!(target: "pyronova::server", panic = msg, "TPC inline worker thread panicked");
+        }
     }
     Ok(())
 }
@@ -581,9 +602,14 @@ fn run_tpc_subinterp_fanout(
                     )
                     .await;
                 });
-            })
-            .map_err(|e| format!("spawn tpc-{i}: {e}"))?;
-        handles.push(handle);
+            });
+        match handle {
+            Ok(h) => handles.push(h),
+            Err(e) => {
+                shutdown.cancel();
+                return Err(format!("spawn tpc-{i}: {e}"));
+            }
+        }
     }
 
     // Acceptor thread — dedicated OS thread with its own current_thread
@@ -681,12 +707,22 @@ fn run_tpc_subinterp_fanout(
                 // shutdown token.
                 drop(worker_txs);
             });
-        })
-        .map_err(|e| format!("spawn acceptor: {e}"))?;
-    handles.push(acceptor);
+        });
+    match acceptor {
+        Ok(h) => handles.push(h),
+        Err(e) => {
+            shutdown.cancel();
+            return Err(format!("spawn acceptor: {e}"));
+        }
+    }
 
     for h in handles {
-        let _ = h.join();
+        if let Err(e) = h.join() {
+            let msg = e.downcast_ref::<String>().map(|s| s.as_str())
+                .or_else(|| e.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown panic");
+            tracing::error!(target: "pyronova::server", panic = msg, "TPC fanout worker/acceptor thread panicked");
+        }
     }
     Ok(())
 }

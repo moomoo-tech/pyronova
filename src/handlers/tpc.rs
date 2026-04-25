@@ -283,7 +283,20 @@ pub(crate) async fn handle_request_tpc_inline(
         worker_ref.tstate = tstate_cell.get();
         match res {
             Ok(r) => r,
-            Err(_) => Err("internal error: TPC handler panic".to_string()),
+            Err(payload) => {
+                let msg = payload
+                    .downcast_ref::<String>()
+                    .map(|s| s.as_str())
+                    .or_else(|| payload.downcast_ref::<&str>().copied())
+                    .unwrap_or("unknown panic");
+                tracing::error!(
+                    target: "pyronova::handler",
+                    panic = msg,
+                    handler = %routes.handler_names.get(handler_idx).map(|s| s.as_str()).unwrap_or("?"),
+                    "TPC handler panicked"
+                );
+                Err(format!("internal error: TPC handler panic: {msg}"))
+            }
         }
     };
 
@@ -302,7 +315,7 @@ pub(crate) async fn handle_request_tpc_inline(
                 &mut resp.headers,
                 &accept_encoding,
             );
-            let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK);
+            let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             let mut builder = Response::builder()
                 .status(status)
                 .header("content-type", &ct_owned)

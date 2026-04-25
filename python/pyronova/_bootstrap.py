@@ -456,6 +456,7 @@ class _UploadFile:
     @property
     def size(self): return len(self.data)
 def _parse_multipart(req):
+    import urllib.parse as _urlparse
     ct = req.headers.get("content-type", "")
     if "multipart/form-data" not in ct: raise ValueError("Not multipart")
     boundary = None
@@ -484,10 +485,27 @@ def _parse_multipart(req):
         for pp in disp.split(";"):
             pp = pp.strip()
             if pp.startswith("name="): fname = pp[5:].strip('"')
-            elif pp.startswith("filename="): ffilename = pp[9:].strip('"')
+            elif pp.startswith("filename*="):
+                # RFC 5987: filename*=charset'language'encoded-value
+                raw = pp[10:].strip().strip('"')
+                try:
+                    _, _, encoded = raw.partition("'"); _, _, encoded = encoded.partition("'")
+                    ffilename = _urlparse.unquote(encoded, errors="replace")
+                except Exception:
+                    ffilename = raw
+            elif pp.startswith("filename="):
+                ffilename = _urlparse.unquote(pp[9:].strip('"'), errors="replace")
         if fname:
             ctype = headers.get("content-type", "application/octet-stream" if ffilename else "text/plain")
-            result[fname] = _UploadFile(fname, ffilename, ctype, data)
+            upload = _UploadFile(fname, ffilename, ctype, data)
+            if fname in result:
+                existing = result[fname]
+                if isinstance(existing, list):
+                    existing.append(upload)
+                else:
+                    result[fname] = [existing, upload]
+            else:
+                result[fname] = upload
     return result
 _uploads_mod.parse_multipart = _parse_multipart
 _uploads_mod.UploadFile = _UploadFile

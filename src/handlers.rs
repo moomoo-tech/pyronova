@@ -268,14 +268,24 @@ pub(crate) fn build_fast_response(
     for (k, v) in &fr.headers {
         builder = builder.header(k.as_str(), v.as_str());
     }
-    // Inline a subset of apply_cors so we don't allocate a BoxBody just
-    // to mutate and reboxed. The fast path is latency-sensitive.
+    // Inline apply_cors to avoid BoxBody alloc + rebox on the fast path.
     if let Some(cfg) = cors {
         if let Ok(v) = cfg.origin.parse::<hyper::header::HeaderValue>() {
             builder = builder.header("access-control-allow-origin", v);
         }
         if let Ok(v) = cfg.methods.parse::<hyper::header::HeaderValue>() {
             builder = builder.header("access-control-allow-methods", v);
+        }
+        if let Ok(v) = cfg.headers.parse::<hyper::header::HeaderValue>() {
+            builder = builder.header("access-control-allow-headers", v);
+        }
+        if cfg.allow_credentials {
+            builder = builder.header("access-control-allow-credentials", "true");
+        }
+        if let Some(expose) = cfg.expose_headers.as_ref() {
+            if let Ok(v) = expose.parse::<hyper::header::HeaderValue>() {
+                builder = builder.header("access-control-expose-headers", v);
+            }
         }
     }
     builder
@@ -538,7 +548,7 @@ pub(crate) fn build_stream_response(info: StreamInfo) -> Response<BoxBody> {
     let body = StreamBody::new(stream);
     let boxed: BoxBody = BoxBody::new(body.map_err(|_| unreachable!()));
 
-    let status = StatusCode::from_u16(info.status).unwrap_or(StatusCode::OK);
+    let status = StatusCode::from_u16(info.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let mut builder = Response::builder()
         .status(status)
         .header("content-type", &info.content_type)
@@ -548,7 +558,8 @@ pub(crate) fn build_stream_response(info: StreamInfo) -> Response<BoxBody> {
     for (k, v) in &info.headers {
         builder = builder.header(k.as_str(), v.as_str());
     }
-    builder
-        .body(boxed)
-        .unwrap_or_else(|_| Response::new(BoxBody::default()))
+    builder.body(boxed).unwrap_or_else(|e| {
+        tracing::error!(target: "pyronova::handler", error = %e, "stream handler returned invalid response headers");
+        Response::new(BoxBody::default())
+    })
 }

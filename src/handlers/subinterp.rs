@@ -239,13 +239,26 @@ pub(crate) async fn handle_request_subinterp(
         };
 
         let routes_ref = Arc::clone(&routes);
-        let handler_result = tokio::task::spawn_blocking(move || {
+        let task = tokio::task::spawn_blocking(move || {
             call_handler_with_hooks(routes_ref, handler_idx, sky_req)
-        })
-        .await
-        .unwrap_or_else(|_| {
-            HandlerResult::PyronovaResponse(Err("handler thread panicked".to_string()))
         });
+        let handler_result = match tokio::time::timeout(std::time::Duration::from_secs(30), task).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                tracing::error!(
+                    target: "pyronova::handler",
+                    error = %e,
+                    "GIL handler thread panicked or was cancelled"
+                );
+                HandlerResult::PyronovaResponse(Err("handler thread panicked".to_string()))
+            }
+            Err(_) => {
+                crate::monitor::DROPPED_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let mut r = full_body(crate::response::gateway_timeout_response());
+                apply_cors(&mut r, routes.cors_config.as_ref());
+                return Ok(r);
+            }
+        };
 
         let mut resp = match handler_result {
             HandlerResult::PyronovaResponse(mut result) => {
@@ -324,7 +337,7 @@ pub(crate) async fn handle_request_subinterp(
                 &mut resp.headers,
                 &accept_encoding,
             );
-            let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK);
+            let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             let mut builder = Response::builder()
                 .status(status)
                 .header("content-type", &ct_owned)
@@ -334,7 +347,14 @@ pub(crate) async fn handle_request_subinterp(
             }
             match builder.body(Full::new(Bytes::from(resp.body))) {
                 Ok(r) => full_body(r),
-                Err(_) => full_body(error_response("invalid response headers")),
+                Err(e) => {
+                    tracing::error!(
+                        target: "pyronova::handler",
+                        error = %e,
+                        "subinterp handler returned invalid response headers"
+                    );
+                    full_body(error_response("invalid response headers"))
+                }
             }
         }
         Err(e) => full_body(error_response(&e)),
