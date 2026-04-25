@@ -34,11 +34,12 @@ class _PyronovaRustHandler(_logging.Handler):
     def emit(self, record):
         try:
             msg = record.getMessage()
-            # Preserve exception tracebacks (logger.exception / exc_info=True)
-            if record.exc_info and not record.exc_text:
-                record.exc_text = self.formatException(record.exc_info)
-            if record.exc_text:
-                msg = f"{msg}\n{record.exc_text}"
+            # Preserve exception tracebacks (logger.exception / exc_info=True).
+            # Use a local variable rather than mutating record.exc_text so the
+            # same LogRecord can safely be routed to multiple handlers.
+            if record.exc_info:
+                exc_text = record.exc_text or self.formatException(record.exc_info)
+                msg = f"{msg}\n{exc_text}"
             _pyronova_emit_log(
                 record.levelname,
                 record.name,
@@ -68,9 +69,14 @@ _PYRONOVA_LEVEL_MAP = {
     "ERROR": _logging.ERROR, "CRITICAL": _logging.CRITICAL,
     "OFF": _logging.CRITICAL + 10,
 }
-_root.setLevel(_PYRONOVA_LEVEL_MAP.get(
-    _os.environ.get("PYRONOVA_LOG_LEVEL", "DEBUG").upper(), _logging.DEBUG
-))
+_log_level_str = _os.environ.get("PYRONOVA_LOG_LEVEL", "DEBUG").upper()
+if _log_level_str not in _PYRONOVA_LEVEL_MAP:
+    import sys as _sys
+    print(
+        f"pyronova: unrecognized PYRONOVA_LOG_LEVEL={_log_level_str!r}, defaulting to DEBUG",
+        file=_sys.stderr,
+    )
+_root.setLevel(_PYRONOVA_LEVEL_MAP.get(_log_level_str, _logging.DEBUG))
 
 # -- Request / Response stubs ------------------------------------------------
 #
@@ -311,7 +317,11 @@ def _get_cookies(req):
         p = p.strip()
         if "=" in p:
             n, _, v = p.partition("=")
-            r[n.strip()] = v.strip()
+            v = v.strip()
+            # RFC 6265 allows DQUOTE-wrapped cookie values
+            if v.startswith('"') and v.endswith('"') and len(v) >= 2:
+                v = v[1:-1]
+            r[n.strip()] = v
     return r
 def _get_cookie(req, name, default=None):
     return _get_cookies(req).get(name, default)
@@ -340,7 +350,14 @@ def _set_cookie(resp, name, value, **kw):
     if kw.get("path", "/"): parts.append(f"Path={kw.get('path','/')}")
     if kw.get("httponly"): parts.append("HttpOnly")
     if kw.get("secure"): parts.append("Secure")
-    if kw.get("samesite", "Lax"): parts.append(f"SameSite={kw.get('samesite','Lax')}")
+    _samesite = kw.get("samesite", "Lax")
+    if _samesite is not None:
+        _samesite_norm = str(_samesite).strip().title()
+        if _samesite_norm not in ("Strict", "Lax", "None"):
+            raise ValueError(
+                f"invalid samesite={_samesite!r}; must be 'Strict', 'Lax', or 'None'"
+            )
+        parts.append(f"SameSite={_samesite_norm}")
     cookie_str = "; ".join(parts)
     hdrs = dict(getattr(resp, "headers", {}) or {})
     existing = hdrs.get("set-cookie")
@@ -352,7 +369,15 @@ def _set_cookie(resp, name, value, **kw):
         hdrs["set-cookie"] = [existing, cookie_str]
     return _Response(body=resp.body, status_code=getattr(resp,"status_code",200), content_type=getattr(resp,"content_type",None), headers=hdrs)
 def _delete_cookie(resp, name, **kw):
-    return _set_cookie(resp, name, "", max_age=0, path=kw.get("path","/"))
+    # Browsers require the delete Set-Cookie to match the original cookie's
+    # Domain/Path/Secure/SameSite attributes; forwarding them all ensures
+    # the deletion actually reaches the right cookie jar entry.
+    return _set_cookie(resp, name, "", max_age=0,
+                       path=kw.get("path", "/"),
+                       domain=kw.get("domain"),
+                       secure=kw.get("secure", False),
+                       httponly=kw.get("httponly", False),
+                       samesite=kw.get("samesite", "Lax"))
 _cookies_mod.get_cookies = _get_cookies
 _cookies_mod.get_cookie = _get_cookie
 _cookies_mod.set_cookie = _set_cookie
@@ -459,18 +484,20 @@ class _UploadFile:
         self.content_type = content_type
         self.data = data
     @property
-    def text(self): return self.data.decode('utf-8', errors='replace')
+    def text(self): return self.data.decode('utf-8')
     @property
     def size(self): return len(self.data)
 def _parse_multipart(req):
     import urllib.parse as _urlparse
     ct = req.headers.get("content-type", "")
-    if "multipart/form-data" not in ct: raise ValueError("Not multipart")
+    if "multipart/form-data" not in ct:
+        raise ValueError(f"not multipart: content-type={ct!r}")
     boundary = None
     for p in ct.split(";"):
         p = p.strip()
         if p.startswith("boundary="): boundary = p[9:].strip().strip('"')
-    if not boundary: raise ValueError("No boundary")
+    if not boundary:
+        raise ValueError(f"no multipart boundary in content-type: {ct!r}")
     body = req.body if isinstance(req.body, bytes) else req.body.encode()
     parts = body.split(f"--{boundary}".encode())
     result = {}
@@ -478,7 +505,12 @@ def _parse_multipart(req):
         if not part or part.strip() in (b"--", b""): continue
         if b"\r\n\r\n" in part: hdr, data = part.split(b"\r\n\r\n", 1)
         elif b"\n\n" in part: hdr, data = part.split(b"\n\n", 1)
-        else: continue
+        else:
+            import logging as _log_mp
+            _log_mp.getLogger("pyronova.uploads").warning(
+                "multipart: skipping part with no header/body separator"
+            )
+            continue
         if data.endswith(b"\r\n"): data = data[:-2]
         elif data.endswith(b"\n"): data = data[:-1]
         headers = {}
@@ -491,7 +523,7 @@ def _parse_multipart(req):
         fname = ffilename = None
         for pp in disp.split(";"):
             pp = pp.strip()
-            if pp.startswith("name="): fname = pp[5:].strip('"')
+            if pp.lower().startswith("name="): fname = pp[5:].strip('"')
             elif pp.startswith("filename*="):
                 # RFC 5987: filename*=charset'language'encoded-value
                 raw = pp[10:].strip().strip('"')
