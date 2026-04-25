@@ -121,7 +121,11 @@ def _fetcher_thread(loop):
 async def _pyronova_engine():
     loop = asyncio.get_running_loop()
     t = threading.Thread(target=_fetcher_thread, args=(loop,), daemon=False)
-    t.start()
+    try:
+        t.start()
+    except RuntimeError:
+        _log.exception("worker=%s fetcher thread failed to start", WORKER_ID)
+        return
     try:
         await asyncio.to_thread(t.join)
     finally:

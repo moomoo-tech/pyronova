@@ -231,7 +231,14 @@ pub(crate) async fn handle_request_tpc_inline(
                 crate::compression::maybe_compress(&mut resp_data, &accept_encoding);
                 match build_response(Ok(resp_data)) {
                     Ok(r) => full_body(r),
-                    Err(_) => full_body(error_response("response build failed")),
+                    Err(e) => {
+                        tracing::error!(
+                            target: "pyronova::handler",
+                            error = %e,
+                            "GIL bridge response build failed"
+                        );
+                        full_body(error_response("response build failed"))
+                    }
                 }
             }
             Ok(crate::bridge::main_bridge::BridgeResponse::Stream(info)) => {
