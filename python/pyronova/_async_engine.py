@@ -104,13 +104,9 @@ def _fetcher_thread(loop):
             if req_data is None:
                 break
             req_id, handler_idx, method, path, params, query, body_bytes, headers, client_ip = req_data
-            fut = asyncio.run_coroutine_threadsafe(
+            asyncio.run_coroutine_threadsafe(
                 _process_request(req_id, handler_idx, method, path, params, query, body_bytes, headers, client_ip),
                 loop,
-            )
-            fut.add_done_callback(
-                lambda f: _log.error("worker=%s dispatch failed: %s", WORKER_ID, f.exception())
-                if not f.cancelled() and f.exception() is not None else None
             )
         except Exception:
             _log.exception("worker=%s fetcher error — continuing", WORKER_ID)
