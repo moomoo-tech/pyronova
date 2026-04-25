@@ -816,8 +816,16 @@ class Pyronova:
         # Priority: param > env var > default
         host = host or os.environ.get("PYRONOVA_HOST", "127.0.0.1")
         port = port or int(os.environ.get("PYRONOVA_PORT", "8000"))
-        workers = workers or (int(os.environ.get("PYRONOVA_WORKERS")) if os.environ.get("PYRONOVA_WORKERS") else None)
-        io_workers = io_workers or (int(os.environ.get("PYRONOVA_IO_WORKERS")) if os.environ.get("PYRONOVA_IO_WORKERS") else None)
+        _w_env = os.environ.get("PYRONOVA_WORKERS")
+        if workers is None and _w_env:
+            workers = int(_w_env)
+        _iw_env = os.environ.get("PYRONOVA_IO_WORKERS")
+        if io_workers is None and _iw_env:
+            io_workers = int(_iw_env)
+        if workers is not None and workers < 1:
+            raise ValueError(f"workers must be >= 1, got {workers}")
+        if io_workers is not None and io_workers < 1:
+            raise ValueError(f"io_workers must be >= 1, got {io_workers}")
         tls_cert = tls_cert or os.environ.get("PYRONOVA_TLS_CERT")
         tls_key = tls_key or os.environ.get("PYRONOVA_TLS_KEY")
         if bool(tls_cert) != bool(tls_key):
@@ -881,11 +889,11 @@ class Pyronova:
         if threading.current_thread() is threading.main_thread():
             signal.signal(signal.SIGINT, signal.SIG_DFL)
 
-        # Run startup hooks
-        for hook in self._startup_hooks:
-            hook()
-
         try:
+            # Run startup hooks inside the try so shutdown hooks still run on failure
+            for hook in self._startup_hooks:
+                hook()
+
             self._engine.run(
                 host=host,
                 port=port,

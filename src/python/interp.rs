@@ -341,7 +341,7 @@ unsafe fn pyronova_send_inner(args: *mut ffi::PyObject) -> *mut ffi::PyObject {
                     body,
                     status,
                     content_type: ctype,
-                    headers: HashMap::new(),
+                    headers: Vec::new(),
                     is_json: false,
                 };
                 let _ = tx.send(Ok(resp));
@@ -754,7 +754,7 @@ pub(crate) struct SubInterpResponse {
     pub body: Vec<u8>,
     pub status: u16,
     pub content_type: Option<String>,
-    pub headers: HashMap<String, String>,
+    pub headers: Vec<(String, String)>,
     pub is_json: bool,
 }
 
@@ -1307,7 +1307,7 @@ def _attach_pyronova_request_helpers(t):\n    from urllib.parse import parse_qs\
                 body: json_str.into_bytes(),
                 status: 200,
                 content_type: None,
-                headers: HashMap::new(),
+                headers: Vec::new(),
                 is_json: true,
             });
         }
@@ -1319,7 +1319,7 @@ def _attach_pyronova_request_helpers(t):\n    from urllib.parse import parse_qs\
                 body: s.into_bytes(),
                 status: 200,
                 content_type: None,
-                headers: HashMap::new(),
+                headers: Vec::new(),
                 is_json: false,
             });
         }
@@ -1334,7 +1334,7 @@ def _attach_pyronova_request_helpers(t):\n    from urllib.parse import parse_qs\
             body: s.into_bytes(),
             status: 200,
             content_type: None,
-            headers: HashMap::new(),
+            headers: Vec::new(),
             is_json: false,
         })
     }
@@ -1363,7 +1363,7 @@ def _attach_pyronova_request_helpers(t):\n    from urllib.parse import parse_qs\
             Some(ct) => py_str(ct).ok_or("failed to create content_type")?,
             None => PyObjRef::from_borrowed(ffi::Py_None()).unwrap(),
         };
-        let py_headers = py_str_dict(&resp.headers).ok_or("failed to create headers dict")?;
+        let py_headers = py_str_dict_from_vec(&resp.headers).ok_or("failed to create headers dict")?;
 
         // _Response(body, status_code, content_type, headers)
         let args = PyObjRef::from_owned(ffi::PyTuple_New(0)).ok_or("failed to create args")?;
@@ -1515,7 +1515,7 @@ def _attach_pyronova_request_helpers(t):\n    from urllib.parse import parse_qs\
         // dict → undefined behaviour / segfault. We collect borrowed
         // key/value refs first, INCREF them, then release the iteration
         // scope before calling any method that may re-enter Python.
-        let mut resp_headers = HashMap::new();
+        let mut resp_headers: Vec<(String, String)> = Vec::new();
         {
             let attr = PyObjRef::from_owned(ffi::PyObject_GetAttrString(ptr, c"headers".as_ptr()));
             if let Some(a) = &attr {
@@ -1536,12 +1536,40 @@ def _attach_pyronova_request_helpers(t):\n    from urllib.parse import parse_qs\
                     // Phase 2: convert — safe to invoke __str__ now.
                     for (k_obj, v_obj) in snapshot {
                         let str_key = PyObjRef::from_owned(ffi::PyObject_Str(k_obj.as_ptr()));
-                        let str_val = PyObjRef::from_owned(ffi::PyObject_Str(v_obj.as_ptr()));
-                        if let (Some(sk), Some(sv)) = (str_key, str_val) {
-                            if let (Ok(k), Ok(v)) =
-                                (pyobj_to_string(sk.as_ptr()), pyobj_to_string(sv.as_ptr()))
-                            {
-                                resp_headers.insert(k, v);
+                        if let Some(sk) = str_key {
+                            if let Ok(k) = pyobj_to_string(sk.as_ptr()) {
+                                // Check if value is a Python list — e.g. multiple Set-Cookie values
+                                if ffi::PyList_Check(v_obj.as_ptr()) != 0 {
+                                    let n = ffi::PyList_Size(v_obj.as_ptr());
+                                    for i in 0..n {
+                                        // PyList_GetItem returns a borrowed ref — do NOT wrap in from_owned.
+                                        let item = ffi::PyList_GetItem(v_obj.as_ptr(), i);
+                                        if item.is_null() {
+                                            ffi::PyErr_Clear();
+                                            continue;
+                                        }
+                                        if let Some(item_str) = PyObjRef::from_owned(ffi::PyObject_Str(item)) {
+                                            if let Ok(v) = pyobj_to_string(item_str.as_ptr()) {
+                                                resp_headers.push((k.clone(), v));
+                                            } else {
+                                                ffi::PyErr_Clear();
+                                            }
+                                        } else {
+                                            ffi::PyErr_Clear();
+                                        }
+                                    }
+                                } else {
+                                    let str_val = PyObjRef::from_owned(ffi::PyObject_Str(v_obj.as_ptr()));
+                                    if let Some(sv) = str_val {
+                                        if let Ok(v) = pyobj_to_string(sv.as_ptr()) {
+                                            resp_headers.push((k, v));
+                                        } else {
+                                            ffi::PyErr_Clear();
+                                        }
+                                    } else {
+                                        ffi::PyErr_Clear();
+                                    }
+                                }
                             }
                         } else {
                             ffi::PyErr_Clear();
@@ -1673,7 +1701,7 @@ def _attach_pyronova_request_helpers(t):\n    from urllib.parse import parse_qs\
                 body: b"ok".to_vec(),
                 status: 200,
                 content_type: None,
-                headers: HashMap::new(),
+                headers: Vec::new(),
                 is_json: false,
             });
         }
@@ -1700,7 +1728,7 @@ def _attach_pyronova_request_helpers(t):\n    from urllib.parse import parse_qs\
                 body: b"ok".to_vec(),
                 status: 200,
                 content_type: None,
-                headers: HashMap::new(),
+                headers: Vec::new(),
                 is_json: false,
             });
         }

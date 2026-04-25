@@ -208,7 +208,7 @@ fn try_compress(
 }
 
 /// Merge `Accept-Encoding` into an existing `Vary` header (case-insensitive)
-/// and set `Content-Encoding`.
+/// and set `Content-Encoding`. Used by the main-thread `ResponseData` path.
 fn set_compression_headers(
     headers: &mut std::collections::HashMap<String, String>,
     encoding: &'static str,
@@ -229,6 +229,36 @@ fn set_compression_headers(
         }
         None => {
             headers.insert("vary".to_string(), "Accept-Encoding".to_string());
+        }
+    }
+}
+
+/// Same as [`set_compression_headers`] but for the sub-interpreter path where
+/// headers are stored as `Vec<(String, String)>` to support duplicate keys
+/// (e.g. multiple `Set-Cookie` values).
+fn set_compression_headers_vec(
+    headers: &mut Vec<(String, String)>,
+    encoding: &'static str,
+) {
+    headers.push(("content-encoding".to_string(), encoding.to_string()));
+    let existing_vary = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("vary"))
+        .map(|(k, v)| (k.clone(), v.clone()));
+    match existing_vary {
+        Some((k, v)) => {
+            if !v
+                .split(',')
+                .any(|tok| tok.trim().eq_ignore_ascii_case("accept-encoding"))
+            {
+                let new_val = format!("{}, Accept-Encoding", v.trim_end());
+                if let Some(entry) = headers.iter_mut().find(|(ek, _)| ek == &k) {
+                    entry.1 = new_val;
+                }
+            }
+        }
+        None => {
+            headers.push(("vary".to_string(), "Accept-Encoding".to_string()));
         }
     }
 }
@@ -262,12 +292,12 @@ pub(crate) fn maybe_compress(data: &mut ResponseData, accept_encoding: &str) {
 pub(crate) fn maybe_compress_subinterp(
     body: &mut Vec<u8>,
     content_type: &str,
-    headers: &mut std::collections::HashMap<String, String>,
+    headers: &mut Vec<(String, String)>,
     accept_encoding: &str,
 ) {
     if headers
-        .keys()
-        .any(|k| k.eq_ignore_ascii_case("content-encoding"))
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("content-encoding"))
     {
         return;
     }
@@ -275,7 +305,7 @@ pub(crate) fn maybe_compress_subinterp(
         return;
     };
     *body = compressed.to_vec();
-    set_compression_headers(headers, encoding);
+    set_compression_headers_vec(headers, encoding);
 }
 
 #[cfg(test)]

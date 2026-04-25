@@ -315,7 +315,7 @@ def _get_cookies(req):
     return r
 def _get_cookie(req, name, default=None):
     return _get_cookies(req).get(name, default)
-_COOKIE_FORBIDDEN = ("\r", "\n", "\0")
+_COOKIE_FORBIDDEN = ("\r", "\n", "\0", ";", ",")
 def _reject_cookie_crlf(field, value):
     if value is None:
         return
@@ -341,8 +341,15 @@ def _set_cookie(resp, name, value, **kw):
     if kw.get("httponly"): parts.append("HttpOnly")
     if kw.get("secure"): parts.append("Secure")
     if kw.get("samesite", "Lax"): parts.append(f"SameSite={kw.get('samesite','Lax')}")
+    cookie_str = "; ".join(parts)
     hdrs = dict(getattr(resp, "headers", {}) or {})
-    hdrs["set-cookie"] = "; ".join(parts)
+    existing = hdrs.get("set-cookie")
+    if existing is None:
+        hdrs["set-cookie"] = cookie_str
+    elif isinstance(existing, list):
+        hdrs["set-cookie"] = existing + [cookie_str]
+    else:
+        hdrs["set-cookie"] = [existing, cookie_str]
     return _Response(body=resp.body, status_code=getattr(resp,"status_code",200), content_type=getattr(resp,"content_type",None), headers=hdrs)
 def _delete_cookie(resp, name, **kw):
     return _set_cookie(resp, name, "", max_age=0, path=kw.get("path","/"))
