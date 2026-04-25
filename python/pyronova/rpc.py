@@ -39,6 +39,9 @@ class RPCClient:
         )
 
     def __getattr__(self, method_name: str):
+        if method_name.startswith("_"):
+            raise AttributeError(method_name)
+
         def remote_call(**kwargs):
             if self.use_msgpack:
                 payload = msgpack.packb(kwargs, use_bin_type=True)
@@ -55,6 +58,7 @@ class RPCClient:
                     "Accept": content_type,
                 },
             )
+            resp.raise_for_status()
 
             if self.use_msgpack and "msgpack" in resp.headers.get("content-type", ""):
                 data = msgpack.unpackb(resp.content, raw=False)
@@ -110,7 +114,7 @@ def rpc_decorator(app, path: str, proto_model=None):
             else:
                 return envelope  # Framework auto-serializes dict as JSON
 
-        # Check if handler takes 2 args (req, data) or 1 (req)
+        # Check if handler takes 2 args (req, data) or 1 (data)
         sig = inspect.signature(fn)
         takes_data = len(sig.parameters) >= 2
 

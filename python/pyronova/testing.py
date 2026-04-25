@@ -38,9 +38,19 @@ import time
 import urllib.parse
 import urllib.request
 import urllib.error
+from collections import defaultdict
 from dataclasses import dataclass, field
 from http.cookiejar import CookieJar
 from typing import Any, Iterator
+
+
+def _collapse_headers(msg) -> "dict[str, str | list[str]]":
+    """Build a headers dict that preserves multi-valued entries (e.g. Set-Cookie).
+    Single-valued headers remain plain strings; repeated headers become lists."""
+    raw: dict[str, list[str]] = defaultdict(list)
+    for k, v in msg.items():
+        raw[k.lower()].append(v)
+    return {k: (vs[0] if len(vs) == 1 else vs) for k, vs in raw.items()}
 
 
 @dataclass
@@ -55,7 +65,16 @@ class TestResponse:
 
     status_code: int
     body: bytes
-    headers: dict[str, str] = field(default_factory=dict)
+    # Multi-valued headers (e.g. Set-Cookie) are stored as lists; all
+    # others remain plain strings. Use get_header_list() for the raw list.
+    headers: dict[str, "str | list[str]"] = field(default_factory=dict)
+
+    def get_header_list(self, name: str) -> list[str]:
+        """Return all values for a header as a list (always a list, even for single values)."""
+        v = self.headers.get(name.lower())
+        if v is None:
+            return []
+        return v if isinstance(v, list) else [v]
 
     @property
     def text(self) -> str:
@@ -193,13 +212,13 @@ class TestClient:
             return TestResponse(
                 status_code=resp.status,
                 body=resp.read(),
-                headers=dict(resp.headers),
+                headers=_collapse_headers(resp.headers),
             )
         except urllib.error.HTTPError as e:
             return TestResponse(
                 status_code=e.code,
                 body=e.read(),
-                headers=dict(e.headers),
+                headers=_collapse_headers(e.headers),
             )
 
     def get(self, path: str, **kwargs) -> TestResponse:

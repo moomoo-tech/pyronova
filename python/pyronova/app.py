@@ -297,16 +297,30 @@ class Pyronova:
             params = list(sig.parameters.values())
             is_async = inspect.iscoroutinefunction(fn)
 
+            import logging as _logging
+            _vlog = _logging.getLogger("pyronova.validation")
+
+            def _validation_error_response(e: Exception) -> "Response":
+                _vlog.warning("request body validation failed: %s", type(e).__name__, exc_info=True)
+                if hasattr(e, "errors"):
+                    import json as _json
+                    try:
+                        errs = e.errors(include_url=False, include_input=False)
+                    except TypeError:
+                        errs = e.errors()
+                    return Response(
+                        body=_json.dumps({"detail": errs}),
+                        status_code=422,
+                        content_type="application/json",
+                    )
+                return Response(body="Request body validation failed", status_code=422, content_type="text/plain")
+
             if is_async:
                 async def wrapper(req):
                     try:
                         validated = mdl.model_validate_json(req.body)
                     except Exception as e:
-                        return Response(
-                            body=str(e),
-                            status_code=422,
-                            content_type="text/plain",
-                        )
+                        return _validation_error_response(e)
                     if len(params) >= 2:
                         return await fn(req, validated)
                     return await fn(validated)
@@ -315,11 +329,7 @@ class Pyronova:
                     try:
                         validated = mdl.model_validate_json(req.body)
                     except Exception as e:
-                        return Response(
-                            body=str(e),
-                            status_code=422,
-                            content_type="text/plain",
-                        )
+                        return _validation_error_response(e)
                     if len(params) >= 2:
                         return fn(req, validated)
                     return fn(validated)
@@ -810,6 +820,12 @@ class Pyronova:
         io_workers = io_workers or (int(os.environ.get("PYRONOVA_IO_WORKERS")) if os.environ.get("PYRONOVA_IO_WORKERS") else None)
         tls_cert = tls_cert or os.environ.get("PYRONOVA_TLS_CERT")
         tls_key = tls_key or os.environ.get("PYRONOVA_TLS_KEY")
+        if bool(tls_cert) != bool(tls_key):
+            raise ValueError(
+                f"tls_cert and tls_key must be provided together: "
+                f"tls_cert={'set' if tls_cert else 'missing'}, "
+                f"tls_key={'set' if tls_key else 'missing'}"
+            )
 
         # Hot reload: watch .py files, restart on change
         reload = reload or os.environ.get("PYRONOVA_RELOAD") == "1"

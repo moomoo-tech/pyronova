@@ -89,28 +89,31 @@ async def _process_request(req_id, handler_idx, method, path, params, query, bod
         # Propagated cancellation — client disconnected or Rust future dropped.
         # Don't send response; the oneshot receiver is already gone.
         pass
-    except Exception as e:
-        # Log BEFORE sending so the server-side record survives even if
-        # _pyronova_send itself fails. Returning only `str(e)` to the client
-        # was masking real handler bugs — the exception type + traceback
-        # are what operators need at 3am, not the reply envelope.
+    except Exception:
         _log.exception("async handler req_id=%s path=%s raised", req_id, path)
-        _pyronova_send(WORKER_ID, _pyronova_pool_id, req_id, 500, "text/plain", str(e).encode("utf-8"))
+        _pyronova_send(WORKER_ID, _pyronova_pool_id, req_id, 500, "text/plain", b"internal server error")
 
 
 def _fetcher_thread(loop):
     while True:
-        # The pool_id argument is the zombie-worker guard (see
-        # src/interp.rs :: pyronova_recv_cfunc). A stale worker whose pool
-        # has been replaced will see None here and exit the loop.
-        req_data = _pyronova_recv(WORKER_ID, _pyronova_pool_id)
-        if req_data is None:
-            break
-        req_id, handler_idx, method, path, params, query, body_bytes, headers, client_ip = req_data
-        asyncio.run_coroutine_threadsafe(
-            _process_request(req_id, handler_idx, method, path, params, query, body_bytes, headers, client_ip),
-            loop,
-        )
+        try:
+            # The pool_id argument is the zombie-worker guard (see
+            # src/interp.rs :: pyronova_recv_cfunc). A stale worker whose pool
+            # has been replaced will see None here and exit the loop.
+            req_data = _pyronova_recv(WORKER_ID, _pyronova_pool_id)
+            if req_data is None:
+                break
+            req_id, handler_idx, method, path, params, query, body_bytes, headers, client_ip = req_data
+            fut = asyncio.run_coroutine_threadsafe(
+                _process_request(req_id, handler_idx, method, path, params, query, body_bytes, headers, client_ip),
+                loop,
+            )
+            fut.add_done_callback(
+                lambda f: _log.error("worker=%s dispatch failed: %s", WORKER_ID, f.exception())
+                if not f.cancelled() and f.exception() is not None else None
+            )
+        except Exception:
+            _log.exception("worker=%s fetcher error — continuing", WORKER_ID)
 
 
 async def _pyronova_engine():
