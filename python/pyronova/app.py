@@ -11,6 +11,7 @@ import os
 
 from pyronova.engine import PyronovaApp as _PyronovaApp, Response, init_logger, emit_python_log
 from pyronova.mcp import MCPServer
+import logging as _logging
 
 
 class LogConfig(TypedDict, total=False):
@@ -30,6 +31,46 @@ def _is_worker() -> bool:
     return os.environ.get("PYRONOVA_WORKER") == "1"
 
 
+class _PyronovaRustHandler(_logging.Handler):
+    """logging.Handler that bridges to Rust tracing via FFI.
+
+    Defined at module level so the isinstance() dedup check in
+    _setup_python_logging_bridge works across repeated calls.
+    """
+
+    def emit(self, record: _logging.LogRecord) -> None:
+        try:
+            msg = record.getMessage()
+            # Preserve exception tracebacks (logger.exception / exc_info=True).
+            # Use a local variable rather than mutating record.exc_text so the
+            # same LogRecord can safely be routed to multiple handlers.
+            if record.exc_info:
+                exc_text = record.exc_text or self.formatException(record.exc_info)
+                msg = f"{msg}\n{exc_text}"
+            emit_python_log(
+                level=record.levelname,
+                name=record.name,
+                message=msg,
+                pathname=record.pathname or "",
+                lineno=record.lineno or 0,
+            )
+        except Exception:
+            # Fallback to Python's built-in error handler — prints to stderr
+            self.handleError(record)
+
+
+_LOGGING_LEVEL_MAP = {
+    "TRACE": _logging.DEBUG,
+    "DEBUG": _logging.DEBUG,
+    "INFO": _logging.INFO,
+    "WARN": _logging.WARNING,
+    "WARNING": _logging.WARNING,
+    "ERROR": _logging.ERROR,
+    "CRITICAL": _logging.CRITICAL,
+    "OFF": _logging.CRITICAL + 10,  # above CRITICAL — blocks everything
+}
+
+
 def _setup_python_logging_bridge(rust_level: str = "DEBUG") -> None:
     """Hijack Python's root logger to route all logs through Rust tracing.
 
@@ -43,49 +84,21 @@ def _setup_python_logging_bridge(rust_level: str = "DEBUG") -> None:
     level=ERROR) are rejected by Python's own level check *before* any
     getMessage() formatting or FFI crossing occurs.
     """
-    import logging
-
-    _LEVEL_MAP = {
-        "TRACE": logging.DEBUG,
-        "DEBUG": logging.DEBUG,
-        "INFO": logging.INFO,
-        "WARN": logging.WARNING,
-        "WARNING": logging.WARNING,
-        "ERROR": logging.ERROR,
-        "CRITICAL": logging.CRITICAL,
-        "OFF": logging.CRITICAL + 10,  # above CRITICAL — blocks everything
-    }
-
-    class PyronovaRustHandler(logging.Handler):
-        """logging.Handler that bridges to Rust tracing via FFI."""
-
-        def emit(self, record: logging.LogRecord) -> None:
-            try:
-                msg = record.getMessage()
-                # Preserve exception tracebacks (logger.exception / exc_info=True)
-                if record.exc_info and not record.exc_text:
-                    record.exc_text = self.formatException(record.exc_info)
-                if record.exc_text:
-                    msg = f"{msg}\n{record.exc_text}"
-                emit_python_log(
-                    level=record.levelname,
-                    name=record.name,
-                    message=msg,
-                    pathname=record.pathname or "",
-                    lineno=record.lineno or 0,
-                )
-            except Exception:
-                # Fallback to Python's built-in error handler — prints to stderr
-                self.handleError(record)
-
-    root = logging.getLogger()
+    root = _logging.getLogger()
     # Don't clear existing handlers — user may have Sentry, DataDog, etc.
     # Only add Pyronova bridge if not already present.
-    if not any(isinstance(h, PyronovaRustHandler) for h in root.handlers):
-        root.addHandler(PyronovaRustHandler())
+    if not any(isinstance(h, _PyronovaRustHandler) for h in root.handlers):
+        root.addHandler(_PyronovaRustHandler())
     # Sync Python's level gate with Rust's EnvFilter — avoids wasted
     # getMessage() + FFI calls for records that Rust would discard anyway
-    root.setLevel(_LEVEL_MAP.get(rust_level.upper(), logging.DEBUG))
+    level_key = rust_level.upper()
+    if level_key not in _LOGGING_LEVEL_MAP:
+        import sys
+        print(
+            f"pyronova: unrecognized log level {rust_level!r}, defaulting to DEBUG",
+            file=sys.stderr,
+        )
+    root.setLevel(_LOGGING_LEVEL_MAP.get(level_key, _logging.DEBUG))
 
 
 class Pyronova:
@@ -165,11 +178,12 @@ class Pyronova:
     @property
     def max_body_size(self) -> int:
         """Max request body size in bytes. Default: 10 MB."""
-        return 10 * 1024 * 1024  # getter returns default; actual value is in Rust
+        return getattr(self, "_max_body_size", 10 * 1024 * 1024)
 
     @max_body_size.setter
     def max_body_size(self, size: int) -> None:
         """Set max request body size. Example: ``app.max_body_size = 50 * 1024 * 1024``"""
+        self._max_body_size = size
         self._engine.set_max_body_size(size)
 
     def enable_compression(
@@ -863,8 +877,17 @@ class Pyronova:
             mcp = self._mcp
 
             def _mcp_handler(req):
-                body = req.text()
-                result = mcp.handle_request(body)
+                import json as _json
+                try:
+                    body = req.text()
+                    result = mcp.handle_request(body)
+                except Exception:
+                    _logging.getLogger("pyronova.mcp").exception("MCP handler error")
+                    result = _json.dumps({
+                        "jsonrpc": "2.0",
+                        "id": None,
+                        "error": {"code": -32603, "message": "Internal error"},
+                    })
                 return Response(
                     body=result,
                     content_type="application/json",
@@ -882,12 +905,7 @@ class Pyronova:
         if _is_worker():
             return
 
-        import signal
         import threading
-        # Suppress Python's noisy KeyboardInterrupt during threading shutdown
-        # (only works in main thread — TestClient runs in a background thread)
-        if threading.current_thread() is threading.main_thread():
-            signal.signal(signal.SIGINT, signal.SIG_DFL)
 
         try:
             # Run startup hooks inside the try so shutdown hooks still run on failure
@@ -908,8 +926,10 @@ class Pyronova:
             for hook in self._shutdown_hooks:
                 try:
                     hook()
-                except Exception as e:
-                    print(f"  [shutdown] Hook {hook.__name__} error: {e}")
+                except Exception:
+                    _logging.getLogger("pyronova.app").exception(
+                        "shutdown hook %s raised", getattr(hook, "__name__", repr(hook))
+                    )
 
     def _run_with_reload(self):
         """Watch .py files and restart server on changes using OS-native events."""
