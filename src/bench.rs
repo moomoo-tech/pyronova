@@ -318,6 +318,7 @@ pub(crate) fn run_loopback_bench(
                 local.block_on(&rt, async move {
                     tpc_accept_loop_inline(
                         addr,
+                        vec![],
                         worker,
                         routes_static,
                         routes_arc_c,

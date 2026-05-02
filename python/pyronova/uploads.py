@@ -39,7 +39,7 @@ class UploadFile:
         return len(self.data)
 
 
-def parse_multipart(req) -> dict[str, UploadFile]:
+def parse_multipart(req) -> "dict[str, UploadFile | list[UploadFile]]":
     """Parse multipart/form-data from request.
 
     Returns dict mapping field name → UploadFile.
@@ -110,11 +110,19 @@ def parse_multipart(req) -> dict[str, UploadFile]:
 
         if field_name:
             content_type = headers.get("content-type", "application/octet-stream" if filename else "text/plain")
-            result[field_name] = UploadFile(
+            upload = UploadFile(
                 name=field_name,
                 filename=filename,
                 content_type=content_type,
                 data=file_data,
             )
+            if field_name in result:
+                existing = result[field_name]
+                if isinstance(existing, list):
+                    existing.append(upload)
+                else:
+                    result[field_name] = [existing, upload]
+            else:
+                result[field_name] = upload
 
     return result

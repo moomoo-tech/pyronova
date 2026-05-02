@@ -17,9 +17,11 @@ defaults are correct. A true DOS simulation needs real traffic.
 
 import pathlib
 
+_REPO = pathlib.Path(__file__).parent.parent
+
 
 def test_submit_semaphore_wired_before_body_collect():
-    src = pathlib.Path("src/handlers/subinterp.rs").read_text()
+    src = (_REPO / "src/handlers/subinterp.rs").read_text()
     # The permit must be taken BEFORE the body-collect phase. The
     # body-collect is guarded by `if is_stream_route` / `else` on
     # the `body_obj = req.into_body()` — find the submit_semaphore
@@ -44,11 +46,12 @@ def test_submit_semaphore_wired_before_body_collect():
 def test_semaphore_reject_returns_503():
     """Confirm the rejection branch is 503 + CORS-applied, not a panic
     or silent drop (the CORS 404 bug from round 3 — don't regress it)."""
-    src = pathlib.Path("src/handlers/subinterp.rs").read_text()
+    src = (_REPO / "src/handlers/subinterp.rs").read_text()
     # The Err branch of try_acquire_owned should construct an
     # overloaded_response and apply_cors before returning.
     # Search for the critical pieces close to the acquire site.
     idx = src.find("submit_semaphore.clone().try_acquire_owned()")
+    assert idx != -1, "submit_semaphore.clone().try_acquire_owned() not found in subinterp.rs"
     window = src[idx:idx + 1500]
     assert "overloaded_response" in window, (
         "rejection must return 503 (overloaded_response), not 500 or silent drop"
@@ -65,7 +68,7 @@ def test_semaphore_reject_returns_503():
 def test_pool_exposes_submit_semaphore():
     """The InterpreterPool struct carries the Arc<Semaphore> so it can be
     reached from handle_request_subinterp."""
-    src = pathlib.Path("src/python/interp.rs").read_text()
+    src = (_REPO / "src/python/interp.rs").read_text()
     assert "submit_semaphore: Arc<tokio::sync::Semaphore>" in src, (
         "InterpreterPool must hold Arc<tokio::sync::Semaphore> as submit_semaphore"
     )

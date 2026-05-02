@@ -30,8 +30,11 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 import typing
 from typing import Any, Callable, Optional
+
+_log = logging.getLogger(__name__)
 
 
 def _extract_schema(fn: Callable) -> dict:
@@ -66,6 +69,11 @@ def _extract_schema(fn: Callable) -> dict:
 
     for name, param in sig.parameters.items():
         if name in ("self", "cls"):
+            continue
+        if param.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
             continue
         hint = hints.get(name)
         prop = {"type": type_map.get(hint, "string")}
@@ -180,6 +188,10 @@ class MCPServer:
         if not isinstance(req, dict):
             return self._error_response(None, -32600, "Invalid Request")
 
+        # JSON-RPC 2.0 §4: absence of "id" means this is a notification —
+        # the server MUST NOT reply.  We return "" which the HTTP layer
+        # converts to a 204-like empty response.
+        is_notification = "id" not in req
         req_id = req.get("id")
         method = req.get("method", "")
         params = req.get("params", {})
@@ -196,12 +208,19 @@ class MCPServer:
 
         handler = handler_map.get(method)
         if handler is None:
+            if is_notification:
+                return ""
             return self._error_response(req_id, -32601, f"Method not found: {method}")
 
         try:
             result = handler(params)
+            if is_notification:
+                return ""
             return json.dumps({"jsonrpc": "2.0", "id": req_id, "result": result})
         except Exception as e:
+            _log.exception("MCP handler %r raised", method)
+            if is_notification:
+                return ""
             return self._error_response(req_id, -32000, str(e))
 
     # ------------------------------------------------------------------
@@ -241,9 +260,15 @@ class MCPServer:
             raise ValueError(f"tool arguments must be an object, got {type(arguments).__name__}")
         handler = tool["handler"]
         result = handler(**arguments)
-        # Await async tools
+        # Await async tools. asyncio.run() fails if called from a running
+        # event loop; use a fresh loop instead (safe because this handler
+        # always executes in a blocking Tokio thread, never inside asyncio).
         if inspect.iscoroutine(result):
-            result = asyncio.run(result)
+            loop = asyncio.new_event_loop()
+            try:
+                result = loop.run_until_complete(result)
+            finally:
+                loop.close()
 
         # Convert result to MCP content format
         if isinstance(result, str):

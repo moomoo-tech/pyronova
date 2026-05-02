@@ -163,7 +163,11 @@ pub(crate) fn build_response(
                 .header("content-type", &data.content_type)
                 .header("server", SERVER_HEADER);
             for (k, v) in &data.headers {
-                builder = builder.header(k.as_str(), v.as_str());
+                // NUL-separated values encode multiple occurrences of the same
+                // header key (e.g. multiple Set-Cookie lines set via cookies.py).
+                for part in v.split('\0') {
+                    builder = builder.header(k.as_str(), part);
+                }
             }
             Ok(builder
                 .body(Full::new(data.body))

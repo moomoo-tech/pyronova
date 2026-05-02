@@ -118,7 +118,7 @@ def baseline11_post(req: "Request"):
     body = req.body
     if body:
         try:
-            total += int(body.decode("ascii", errors="replace").strip())
+            total += int(body.decode("ascii", errors="strict").strip())
         except (ValueError, UnicodeDecodeError):
             pass
     return Response(str(total), content_type="text/plain")
@@ -167,7 +167,7 @@ def json_endpoint(req: "Request"):
         m = int(req.query_params.get("m", "1"))
     except ValueError:
         m = 1
-    count = min(count, len(DATASET_ITEMS))
+    count = max(0, min(count, len(DATASET_ITEMS)))
     items = [
         {**dsitem, "total": dsitem["price"] * dsitem["quantity"] * m}
         for dsitem in DATASET_ITEMS[:count]
@@ -255,6 +255,7 @@ def _rows_to_payload(rows):
 _EMPTY_DB_RESPONSE = {"items": [], "count": 0}
 _NOT_FOUND = Response("not found", status_code=404, content_type="text/plain")
 _BAD_REQUEST = Response("bad request", status_code=400, content_type="text/plain")
+_INTERNAL_ERROR = Response("internal server error", status_code=500, content_type="text/plain")
 
 
 # ---------------------------------------------------------------------------
@@ -346,7 +347,7 @@ def crud_get_one(req: "Request"):
         row = PG_POOL.fetch_one(_CRUD_GET_SQL, item_id)
     except RuntimeError:
         log.warning("/crud/items/%s: fetch_one failed", item_id, exc_info=True)
-        return _NOT_FOUND
+        return _INTERNAL_ERROR
     if row is None:
         return _NOT_FOUND
     item = _row_to_full_item(row)
@@ -381,7 +382,7 @@ def crud_list(req: "Request"):
         rows = PG_POOL.fetch_all(_CRUD_LIST_SQL, category, limit, offset)
     except RuntimeError:
         log.warning("/crud/items list: fetch_all failed", exc_info=True)
-        return _EMPTY_CRUD_LIST
+        return _INTERNAL_ERROR
     items = [_row_to_full_item(r) for r in rows]
     return {"items": items, "total": len(items), "page": page, "limit": limit}
 
@@ -405,7 +406,7 @@ def crud_update(req: "Request"):
         affected = PG_POOL.execute(_CRUD_UPDATE_SQL, name, price, quantity, item_id)
     except RuntimeError:
         log.warning("/crud/items/%s update: execute failed", item_id, exc_info=True)
-        return _NOT_FOUND
+        return _INTERNAL_ERROR
     if affected == 0:
         return _NOT_FOUND
     _CRUD_CACHE.pop(item_id, None)
@@ -435,7 +436,7 @@ def crud_upsert(req: "Request"):
         )
     except RuntimeError:
         log.warning("/crud/items upsert id=%s: fetch_scalar failed", item_id, exc_info=True)
-        return _BAD_REQUEST
+        return _INTERNAL_ERROR
     _CRUD_CACHE.pop(item_id, None)
     return Response(
         body=json.dumps({
@@ -459,4 +460,6 @@ if __name__ == "__main__":
     port = int(os.environ.get("PYRONOVA_PORT", "8080"))
     # Detect worker count from cgroup cpu.max (same pattern as actix's helper).
     # Pyronova's engine will fall back to num_cpus if PYRONOVA_WORKERS isn't set.
-    app.run(host=host, port=port)
+    _tls_ports_env = os.environ.get("PYRONOVA_TLS_PORTS")
+    extra_tls_ports = [int(p) for p in _tls_ports_env.split(",") if p.strip()] if _tls_ports_env else None
+    app.run(host=host, port=port, extra_tls_ports=extra_tls_ports)

@@ -324,7 +324,7 @@ impl PyronovaApp {
 
     #[pyo3(signature = (
         host=None, port=None, workers=None, mode=None, io_workers=None,
-        tls_cert=None, tls_key=None, tpc=None,
+        tls_cert=None, tls_key=None, tpc=None, extra_tls_ports=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn run(
@@ -338,6 +338,7 @@ impl PyronovaApp {
         tls_cert: Option<&str>,
         tls_key: Option<&str>,
         tpc: Option<bool>,
+        extra_tls_ports: Option<Vec<u16>>,
     ) -> PyResult<()> {
         // Refresh the metrics kill-switch from the current env every
         // run() — process-level state, but tests / hot-reload may flip
@@ -425,6 +426,30 @@ impl PyronovaApp {
             }
         };
 
+        // Extra TLS ports: read from PYRONOVA_TLS_PORTS env if not provided.
+        let extra_tls_ports: Vec<u16> = extra_tls_ports
+            .or_else(|| {
+                std::env::var("PYRONOVA_TLS_PORTS").ok().map(|s| {
+                    s.split(',').filter_map(|p| p.trim().parse().ok()).collect()
+                })
+            })
+            .unwrap_or_default();
+
+        let extra_tls: Vec<(SocketAddr, Arc<tokio_rustls::TlsAcceptor>)> =
+            if let Some(ref acc) = tls_acceptor {
+                extra_tls_ports
+                    .iter()
+                    .filter_map(|&p| {
+                        format!("{host}:{p}")
+                            .parse::<SocketAddr>()
+                            .ok()
+                            .map(|sa| (sa, Arc::clone(acc)))
+                    })
+                    .collect()
+            } else {
+                vec![]
+            };
+
         // TPC is now the default — automatic when the route set is
         // compatible (no gil=True / async def / stream=True routes).
         // Incompatible workloads fall back silently to the old
@@ -487,6 +512,7 @@ impl PyronovaApp {
                     num_cpus,
                     frozen,
                     tls_acceptor,
+                    extra_tls,
                 )
             } else {
                 self.run_subinterp(
@@ -1054,6 +1080,7 @@ impl PyronovaApp {
         num_cpus: usize,
         routes: FrozenRoutes,
         tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
+        extra_tls: Vec<(SocketAddr, Arc<tokio_rustls::TlsAcceptor>)>,
     ) -> PyResult<()> {
         // gil=True routes: main-interp bridge (Phase 3).
         // async def: sub-interp path already drives coroutines via the
@@ -1166,6 +1193,7 @@ impl PyronovaApp {
                 routes,
                 tls_acceptor,
                 main_bridge,
+                extra_tls,
             )
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)
         })

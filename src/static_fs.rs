@@ -70,10 +70,15 @@ pub(crate) async fn try_static_file(
     static_dirs: &[(String, String)],
 ) -> Option<Response<Full<Bytes>>> {
     for (prefix, directory) in static_dirs {
-        if !req_path.starts_with(prefix.as_str()) {
+        let prefix_str = prefix.as_str();
+        if !req_path.starts_with(prefix_str) {
             continue;
         }
-        let rel = req_path[prefix.len()..].trim_start_matches('/');
+        let after_prefix = &req_path[prefix_str.len()..];
+        if !after_prefix.is_empty() && !after_prefix.starts_with('/') {
+            continue; // /static must not match /staticfoo
+        }
+        let rel = after_prefix.trim_start_matches('/');
         if rel.is_empty() {
             continue;
         }
@@ -81,7 +86,8 @@ pub(crate) async fn try_static_file(
         // Cheap fast-reject for obvious traversal in the untrusted request.
         // Not the only defense — the canonicalize check below is what
         // actually keeps us honest against symlinks and encoded variants.
-        if rel.contains("..") {
+        // Check components so `my..notes.txt` is not blocked as a false positive.
+        if rel.split('/').any(|c| c == "..") {
             return Some(forbidden_response());
         }
 
@@ -171,20 +177,23 @@ pub(crate) async fn try_static_file(
         {
             continue;
         }
-        let ext = file_canonical
+        let ext_raw = file_canonical
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("");
-        let ct = mime_from_ext(ext);
+        let ext_lower = ext_raw.to_ascii_lowercase();
+        let ct = mime_from_ext(&ext_lower);
 
         // Populate the cache for future requests. Skip once the cumulative
         // cache size has crossed the soft cap — serving uncached is still
         // correct, just pays the re-read cost. We don't evict: static files
         // rarely rotate, and an LRU would need locking around every hit.
         let bytes = Bytes::from(contents);
-        let prev = cache_bytes().load(std::sync::atomic::Ordering::Relaxed);
-        if prev + bytes.len() as u64 <= STATIC_CACHE_MAX_BYTES {
-            cache_bytes().fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        // Atomically reserve space: fetch_add first, then check the new total.
+        // If we overshoot the soft cap, roll back and skip caching.
+        let new_total = cache_bytes().fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed)
+            + bytes.len() as u64;
+        if new_total <= STATIC_CACHE_MAX_BYTES {
             cache().insert(
                 file_canonical.clone(),
                 CachedFile {
@@ -192,6 +201,8 @@ pub(crate) async fn try_static_file(
                     content_type: ct,
                 },
             );
+        } else {
+            cache_bytes().fetch_sub(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
         }
         return Some(ok_response_bytes(ct, bytes));
     }

@@ -86,21 +86,24 @@ fn negotiate(accept_encoding: &str, mask: usize) -> Option<Algo> {
             Some((n, rest)) => {
                 let mut q = 1.0f32;
                 for param in rest.split(';') {
-                    let p = param.trim().to_ascii_lowercase();
-                    if let Some(v) = p.strip_prefix("q=") {
+                    let p = param.trim();
+                    // Case-insensitive "q=" prefix check without heap allocation.
+                    if p.len() >= 2 && p[..2].eq_ignore_ascii_case("q=") {
                         // Malformed q-value → 0.0 (disabled), not 1.0 (max preference).
-                        q = v.trim().parse().unwrap_or(0.0);
+                        q = p[2..].trim().parse().unwrap_or(0.0);
                     }
                 }
                 (n.trim(), q)
             }
             None => (part, 1.0),
         };
-        match name.to_ascii_lowercase().as_str() {
-            "br" => br_q = br_q.max(q),
-            "gzip" | "x-gzip" => gz_q = gz_q.max(q),
-            "*" => star_q = star_q.max(q),
-            _ => {}
+        // eq_ignore_ascii_case avoids a heap allocation on every token.
+        if name.eq_ignore_ascii_case("br") {
+            br_q = br_q.max(q);
+        } else if name.eq_ignore_ascii_case("gzip") || name.eq_ignore_ascii_case("x-gzip") {
+            gz_q = gz_q.max(q);
+        } else if name == "*" {
+            star_q = star_q.max(q);
         }
     }
 
@@ -127,13 +130,16 @@ fn is_compressible(content_type: &str) -> bool {
         .split(';')
         .next()
         .unwrap_or(content_type)
-        .trim()
-        .to_ascii_lowercase();
-    if ct.starts_with("text/") {
+        .trim();
+    // "text/" prefix — case-insensitive, no allocation.
+    if ct.len() > 5 && ct[..5].eq_ignore_ascii_case("text/") {
         return true;
     }
+    // application/* and image/svg types. The framework always emits these
+    // lowercase, so exact match is sufficient; mixed-case from a handler is
+    // an edge case and a miss is harmless (response stays uncompressed).
     matches!(
-        ct.as_str(),
+        ct,
         "application/json"
             | "application/javascript"
             | "application/xml"
@@ -215,6 +221,9 @@ fn set_compression_headers(
     encoding: &'static str,
 ) {
     headers.insert("content-encoding".to_string(), encoding.to_string());
+    // Remove any handler-supplied Content-Length — it reflected the pre-compression
+    // size and is now wrong. hyper will recompute from the compressed body.
+    headers.retain(|k, _| !k.eq_ignore_ascii_case("content-length"));
     let existing_vary = headers
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("vary"))
@@ -243,6 +252,9 @@ fn set_compression_headers_vec(
     encoding: &'static str,
 ) {
     headers.push(("content-encoding".to_string(), encoding.to_string()));
+    // Remove any handler-supplied Content-Length — it reflected the pre-compression
+    // size and is now wrong. hyper will recompute from the compressed body.
+    headers.retain(|(k, _)| !k.eq_ignore_ascii_case("content-length"));
     let existing_vary = headers
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("vary"))
@@ -358,6 +370,40 @@ mod tests {
     #[test]
     fn negotiate_none_when_unsupported() {
         assert_eq!(negotiate("deflate, compress", ALGO_GZIP | ALGO_BR), None);
+    }
+
+    #[test]
+    fn negotiate_uppercase_q_param() {
+        // Q= should be treated the same as q= (case-insensitive param name).
+        let algo = negotiate("br;Q=0, gzip", ALGO_GZIP | ALGO_BR);
+        assert_eq!(algo, Some(Algo::Gzip));
+    }
+
+    #[test]
+    fn negotiate_uppercase_algo_names() {
+        // BR / GZIP in caps — real clients don't do this but we should be robust.
+        let algo = negotiate("BR, GZIP", ALGO_GZIP | ALGO_BR);
+        assert_eq!(algo, Some(Algo::Brotli));
+    }
+
+    #[test]
+    fn negotiate_malformed_q_disables() {
+        // Malformed q-value should disable the algorithm (0.0), not enable it (1.0).
+        let algo = negotiate("br;q=bad, gzip", ALGO_GZIP | ALGO_BR);
+        assert_eq!(algo, Some(Algo::Gzip));
+    }
+
+    #[test]
+    fn is_compressible_mixed_case_text() {
+        assert!(is_compressible("Text/HTML"));
+        assert!(is_compressible("TEXT/plain; charset=utf-8"));
+    }
+
+    #[test]
+    fn is_compressible_exact_application_types() {
+        assert!(is_compressible("application/json"));
+        assert!(is_compressible("application/ld+json"));
+        assert!(!is_compressible("application/octet-stream"));
     }
 
     #[test]

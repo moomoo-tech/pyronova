@@ -118,7 +118,7 @@ class TestClient:
 
     def __init__(
         self,
-        app,
+        app: Any,
         host: str = "127.0.0.1",
         port: int | None = None,
         *,
@@ -144,10 +144,15 @@ class TestClient:
             _NoRedirectHandler() if not follow_redirects else urllib.request.HTTPRedirectHandler(),
         )
 
-        self._thread = threading.Thread(
-            target=lambda: app.run(host=host, port=port, mode="default"),
-            daemon=True,
-        )
+        self._server_error: Exception | None = None
+
+        def _run_server():
+            try:
+                app.run(host=host, port=port, mode="default")
+            except Exception as e:
+                self._server_error = e
+
+        self._thread = threading.Thread(target=_run_server, daemon=True)
         self._thread.start()
 
         # Readiness probe. Any HTTP response (2xx-5xx) proves the server
@@ -156,7 +161,11 @@ class TestClient:
         for _ in range(50):
             time.sleep(0.1)
             if not self._thread.is_alive():
-                raise RuntimeError("TestClient: server thread exited before accepting connections")
+                err = self._server_error
+                raise RuntimeError(
+                    f"TestClient: server thread exited before accepting connections"
+                    + (f": {type(err).__name__}: {err}" if err else "")
+                )
             try:
                 resp = self._opener.open(f"{self.base_url}/", timeout=1)
                 resp.close()
@@ -282,7 +291,7 @@ class WebSocketSession:
     that supports use as a context manager and exposes ``send``/``recv``
     directly so tests don't have to learn the underlying library."""
 
-    def __init__(self, conn):
+    def __init__(self, conn: Any):
         self._conn = conn
 
     def __enter__(self) -> "WebSocketSession":

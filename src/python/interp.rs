@@ -1081,13 +1081,18 @@ def _attach_pyronova_request_helpers(t):\n    from urllib.parse import parse_qs\
                     std::ptr::null(),
                 );
                 let run_func = if !loop_obj.is_null() {
-                    // Set as current loop
-                    ffi::PyObject_CallMethod(
+                    // Set as current loop; Py_DECREF the None return value.
+                    let set_result = ffi::PyObject_CallMethod(
                         asyncio_mod,
                         c"set_event_loop".as_ptr(),
                         c"O".as_ptr(),
                         loop_obj,
                     );
+                    if !set_result.is_null() {
+                        ffi::Py_DECREF(set_result);
+                    } else {
+                        ffi::PyErr_Clear();
+                    }
                     ffi::PyObject_GetAttrString(loop_obj, c"run_until_complete".as_ptr())
                 } else {
                     ffi::PyErr_Clear();

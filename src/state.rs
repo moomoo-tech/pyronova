@@ -41,11 +41,13 @@ impl SharedState {
         self.inner.insert(key, Bytes::from(value.into_bytes()));
     }
 
-    /// Get a string value. Returns None if key doesn't exist.
-    fn get(&self, key: &str) -> Option<String> {
+    /// Get a string value. Returns ``default`` (None) if key doesn't exist.
+    #[pyo3(signature = (key, default=None))]
+    fn get(&self, key: &str, default: Option<String>) -> Option<String> {
         self.inner
             .get(key)
             .and_then(|v| std::str::from_utf8(v.value()).ok().map(|s| s.to_string()))
+            .or(default)
     }
 
     /// Set raw bytes value.
@@ -68,6 +70,26 @@ impl SharedState {
         self.inner.iter().map(|e| e.key().clone()).collect()
     }
 
+    /// Get all string values (keys with non-UTF-8 bytes are silently skipped).
+    fn values(&self) -> Vec<String> {
+        self.inner
+            .iter()
+            .filter_map(|e| std::str::from_utf8(e.value()).ok().map(|s| s.to_string()))
+            .collect()
+    }
+
+    /// Get all (key, value) pairs as a list of tuples.
+    fn items(&self) -> Vec<(String, String)> {
+        self.inner
+            .iter()
+            .filter_map(|e| {
+                std::str::from_utf8(e.value())
+                    .ok()
+                    .map(|v| (e.key().clone(), v.to_string()))
+            })
+            .collect()
+    }
+
     /// Number of entries.
     fn __len__(&self) -> usize {
         self.inner.len()
@@ -85,7 +107,7 @@ impl SharedState {
 
     /// dict-like: state["key"]
     fn __getitem__(&self, key: &str) -> PyResult<String> {
-        self.get(key)
+        self.get(key, None)
             .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(key.to_string()))
     }
 
@@ -128,7 +150,10 @@ impl SharedState {
 
     /// Atomic decrement: returns the new value.
     fn decr(&self, key: String, amount: i64) -> PyResult<i64> {
-        self.incr(key, -amount)
+        let neg = amount.checked_neg().ok_or_else(|| {
+            pyo3::exceptions::PyOverflowError::new_err("decr: amount i64::MIN cannot be negated")
+        })?;
+        self.incr(key, neg)
     }
 
     fn __repr__(&self) -> String {

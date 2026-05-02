@@ -18,9 +18,11 @@ stops the fix from silently regressing.
 
 import pathlib
 
+_REPO = pathlib.Path(__file__).parent.parent
+
 
 def test_async_engine_graceful_shutdown_present():
-    src = pathlib.Path("python/pyronova/_async_engine.py").read_text()
+    src = (_REPO / "python/pyronova/_async_engine.py").read_text()
     assert "asyncio.all_tasks(loop)" in src, (
         "_pyronova_engine's finally block must enumerate pending tasks to cancel"
     )

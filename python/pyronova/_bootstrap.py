@@ -282,7 +282,14 @@ def _cached_json(ttl, key=None):
         @_functools.wraps(handler)
         def wrapper(req):
             now = _time.monotonic()
-            k = _key_fn(req)
+            try:
+                k = _key_fn(req)
+            except Exception:
+                import logging as _log_cache
+                _log_cache.getLogger("pyronova.cache").exception(
+                    "cached_json key function raised; bypassing cache"
+                )
+                return handler(req)
             entry = _cache.get(k)
             if entry is not None and entry[1] > now:
                 return _Response(body=entry[0], content_type="application/json")
@@ -356,6 +363,11 @@ def _set_cookie(resp, name, value, **kw):
         if _samesite_norm not in ("Strict", "Lax", "None"):
             raise ValueError(
                 f"invalid samesite={_samesite!r}; must be 'Strict', 'Lax', or 'None'"
+            )
+        if _samesite_norm == "None" and not kw.get("secure", False):
+            raise ValueError(
+                "SameSite=None requires Secure=True; browsers silently drop "
+                "SameSite=None cookies that are not Secure (Chrome 80+, Firefox, Safari)"
             )
         parts.append(f"SameSite={_samesite_norm}")
     cookie_str = "; ".join(parts)
@@ -431,13 +443,30 @@ class _PgPool:
         return _pyronova_db_execute(sql, params)  # type: ignore[name-defined]
     def fetch_iter(self, *a, **kw):
         return _MockPgCursor()
-    # Async variants — still stubs. Adding them needs async C-FFI
-    # entry points; the sqlx pool itself is async-native, but the
-    # current bridge blocks the sub-interp worker thread on the runtime.
-    async def fetch_one_async(self, *a, **kw): return None
-    async def fetch_all_async(self, *a, **kw): return []
-    async def fetch_scalar_async(self, *a, **kw): return None
-    async def execute_async(self, *a, **kw): return 0
+    # Async variants — not yet implemented. Silently returning falsy
+    # values (None / [] / 0) would masquerade as "no rows" / "success"
+    # and corrupt caller logic. Raise so callers know immediately that
+    # async DB is unavailable in sub-interpreter mode.
+    async def fetch_one_async(self, *a, **kw):
+        raise NotImplementedError(
+            "fetch_one_async is not available in sub-interpreter workers; "
+            "use fetch_one (sync) or route with gil=True"
+        )
+    async def fetch_all_async(self, *a, **kw):
+        raise NotImplementedError(
+            "fetch_all_async is not available in sub-interpreter workers; "
+            "use fetch_all (sync) or route with gil=True"
+        )
+    async def fetch_scalar_async(self, *a, **kw):
+        raise NotImplementedError(
+            "fetch_scalar_async is not available in sub-interpreter workers; "
+            "use fetch_scalar (sync) or route with gil=True"
+        )
+    async def execute_async(self, *a, **kw):
+        raise NotImplementedError(
+            "execute_async is not available in sub-interpreter workers; "
+            "use execute (sync) or route with gil=True"
+        )
 
 _db_mod.PgPool = _PgPool
 _db_mod.PgCursor = _MockPgCursor
@@ -531,6 +560,10 @@ def _parse_multipart(req):
                     _, _, encoded = raw.partition("'"); _, _, encoded = encoded.partition("'")
                     ffilename = _urlparse.unquote(encoded, errors="replace")
                 except Exception:
+                    import logging as _log_mp2
+                    _log_mp2.getLogger("pyronova.uploads").warning(
+                        "multipart: failed to decode RFC 5987 filename*= value %r", raw
+                    )
                     ffilename = raw
             elif pp.startswith("filename="):
                 ffilename = _urlparse.unquote(pp[9:].strip('"'), errors="replace")

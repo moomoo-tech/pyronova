@@ -61,7 +61,7 @@ impl PyronovaStream {
     /// Uses try_send to preserve sync semantics — blocking on a Tokio
     /// mpsc.send() from the Python handler thread would require async.
     fn send(&self, data: &str) -> PyResult<()> {
-        let tx_guard = self.tx.lock().unwrap();
+        let tx_guard = self.tx.lock().unwrap_or_else(|e| e.into_inner());
         let tx = tx_guard.as_ref().ok_or_else(|| {
             pyo3::exceptions::PyConnectionError::new_err("stream was explicitly closed")
         })?;
@@ -81,6 +81,24 @@ impl PyronovaStream {
     /// Send an SSE event: `event: {event}\ndata: {data}\n\n`
     #[pyo3(signature = (data, event=None, id=None))]
     fn send_event(&self, data: &str, event: Option<&str>, id: Option<&str>) -> PyResult<()> {
+        // SSE field values for `id` and `event` must not contain CR or LF —
+        // a newline in either injects arbitrary SSE fields (e.g. injecting
+        // "data: attacker-controlled" by embedding "\ndata: ..." in an event name).
+        // Per RFC 8895 the id and event fields are single-line.
+        if let Some(id) = id {
+            if id.contains(['\n', '\r']) {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "SSE id must not contain newline or carriage-return characters",
+                ));
+            }
+        }
+        if let Some(event) = event {
+            if event.contains(['\n', '\r']) {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "SSE event name must not contain newline or carriage-return characters",
+                ));
+            }
+        }
         let mut msg = String::with_capacity(data.len() + 64);
         if let Some(id) = id {
             msg.push_str("id: ");
@@ -92,10 +110,24 @@ impl PyronovaStream {
             msg.push_str(event);
             msg.push('\n');
         }
-        for line in data.lines() {
+        // SSE spec (WHATWG): line endings are \n, \r\n, or bare \r. Rust's
+        // str::lines() handles \n and \r\n but preserves bare \r within a line,
+        // enabling injection of extra SSE fields via a \r in data. Normalize
+        // bare \r to \n first so all three variants split correctly.
+        let data_norm;
+        let data_ref: &str = if data.contains('\r') {
+            data_norm = data.replace("\r\n", "\n").replace('\r', "\n");
+            &data_norm
+        } else {
+            data
+        };
+        for line in data_ref.lines() {
             msg.push_str("data: ");
             msg.push_str(line);
             msg.push('\n');
+        }
+        if data_ref.is_empty() {
+            msg.push_str("data: \n");
         }
         msg.push('\n'); // End of event
         self.send(&msg)
@@ -105,15 +137,14 @@ impl PyronovaStream {
     /// causing the Tokio Receiver to see channel-closed and end the HTTP
     /// response. Does not depend on Python GC timing.
     fn close(&self) {
-        if let Ok(mut lock) = self.tx.lock() {
-            let _ = lock.take();
-        }
+        let mut lock = self.tx.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = lock.take();
     }
 }
 
 impl PyronovaStream {
     /// Take the receiver (called once by Rust handler to start streaming).
     pub(crate) fn take_rx(&self) -> Option<mpsc::Receiver<StreamItem>> {
-        self.rx.lock().unwrap().take()
+        self.rx.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 }

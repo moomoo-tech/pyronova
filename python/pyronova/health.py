@@ -38,9 +38,12 @@ from __future__ import annotations
 import asyncio
 import json
 import inspect
+import logging
 from typing import Any, Awaitable, Callable, Union
 
 from pyronova.engine import Response
+
+_log = logging.getLogger(__name__)
 
 
 CheckFn = Union[Callable[[], Any], Callable[[], Awaitable[Any]]]
@@ -67,6 +70,7 @@ def _run_checks_sync(checks: list[tuple[str, CheckFn]]) -> tuple[bool, dict[str,
             else:
                 results[name] = {"ok": True}
         except Exception as e:  # noqa: BLE001 — probe must never crash
+            _log.exception("readiness check %r raised", name)
             results[name] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
             all_ok = False
     return all_ok, results

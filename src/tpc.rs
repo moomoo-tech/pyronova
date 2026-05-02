@@ -344,6 +344,7 @@ pub(crate) fn run_tpc_subinterp(
     routes: FrozenRoutes,
     tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
     main_bridge: Option<Arc<crate::bridge::main_bridge::MainInterpBridge>>,
+    extra_tls: Vec<(SocketAddr, Arc<tokio_rustls::TlsAcceptor>)>,
 ) -> Result<(), String> {
     if workers.len() != n_threads {
         return Err(format!(
@@ -375,6 +376,7 @@ pub(crate) fn run_tpc_subinterp(
                 routes,
                 tls_acceptor,
                 main_bridge,
+                extra_tls,
             );
         }
         return run_tpc_subinterp_per_thread_listener(
@@ -385,6 +387,7 @@ pub(crate) fn run_tpc_subinterp(
             routes,
             tls_acceptor,
             main_bridge,
+            extra_tls,
         );
     }
 
@@ -398,6 +401,7 @@ pub(crate) fn run_tpc_subinterp(
             routes,
             tls_acceptor,
             main_bridge,
+            extra_tls,
         )
     }
 }
@@ -410,6 +414,7 @@ fn run_tpc_subinterp_per_thread_listener(
     routes: FrozenRoutes,
     tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
     main_bridge: Option<Arc<crate::bridge::main_bridge::MainInterpBridge>>,
+    extra_tls: Vec<(SocketAddr, Arc<tokio_rustls::TlsAcceptor>)>,
 ) -> Result<(), String> {
     log_startup("hybrid-inline", &addr, n_threads, n_cpus, &routes);
 
@@ -451,6 +456,7 @@ fn run_tpc_subinterp_per_thread_listener(
 
         let bridge = main_bridge.clone();
         let shutdown_thread = shutdown.clone();
+        let extra_tls_clone = extra_tls.clone();
         let handle = std::thread::Builder::new()
             .name(format!("pyronova-tpc-{i}"))
             .spawn(move || {
@@ -472,6 +478,7 @@ fn run_tpc_subinterp_per_thread_listener(
                 local.block_on(&rt, async move {
                     tpc_accept_loop_inline(
                         addr,
+                        extra_tls_clone,
                         worker,
                         routes_static,
                         routes_arc,
@@ -517,6 +524,7 @@ fn run_tpc_subinterp_fanout(
     routes: FrozenRoutes,
     tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
     main_bridge: Option<Arc<crate::bridge::main_bridge::MainInterpBridge>>,
+    _extra_tls: Vec<(SocketAddr, Arc<tokio_rustls::TlsAcceptor>)>,
 ) -> Result<(), String> {
     log_startup("hybrid-inline-fanout", &addr, n_threads, n_cpus, &routes);
 
@@ -848,8 +856,22 @@ fn fire_gc(worker: &std::rc::Rc<std::cell::RefCell<SubInterpreterWorker>>) {
     w.tstate = tstate_cell.get();
 }
 
+/// Accept from `slot` if Some, otherwise pend forever.
+async fn tls_accept_or_pending(
+    slot: Option<&(TcpListener, Arc<tokio_rustls::TlsAcceptor>)>,
+) -> (
+    std::io::Result<(tokio::net::TcpStream, std::net::SocketAddr)>,
+    Option<Arc<tokio_rustls::TlsAcceptor>>,
+) {
+    match slot {
+        Some((l, acc)) => (l.accept().await, Some(Arc::clone(acc))),
+        None => std::future::pending().await,
+    }
+}
+
 pub(crate) async fn tpc_accept_loop_inline(
     addr: SocketAddr,
+    extra_tls: Vec<(SocketAddr, Arc<tokio_rustls::TlsAcceptor>)>,
     worker: std::rc::Rc<std::cell::RefCell<SubInterpreterWorker>>,
     routes_static: &'static crate::router::RouteTable,
     routes_arc: FrozenRoutes,
@@ -871,6 +893,28 @@ pub(crate) async fn tpc_accept_loop_inline(
             return;
         }
     };
+
+    let extra_listeners: Vec<(TcpListener, Arc<tokio_rustls::TlsAcceptor>)> = extra_tls
+        .into_iter()
+        .filter_map(|(tls_addr, acc)| {
+            let std_sock = match create_reuseport_listener(tls_addr) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(target: "pyronova::server", error = %e, addr = %tls_addr, "TPC extra TLS listener failed");
+                    return None;
+                }
+            };
+            match TcpListener::from_std(std_sock) {
+                Ok(l) => Some((l, acc)),
+                Err(e) => {
+                    tracing::error!(target: "pyronova::server", error = %e, addr = %tls_addr, "TPC extra TLS TcpListener::from_std failed");
+                    None
+                }
+            }
+        })
+        .collect();
+    let tls_slot0 = extra_listeners.get(0);
+    let tls_slot1 = extra_listeners.get(1);
 
     let gc_mode = gc_mode_from_env();
     // In idle mode, disable the count-based trigger inside call_handler —
@@ -930,6 +974,50 @@ pub(crate) async fn tpc_accept_loop_inline(
                             Err(e) => handle_accept_error(&e).await,
                         }
                     }
+                    (res, tls_acc) = tls_accept_or_pending(tls_slot0) => {
+                        match res {
+                            Ok((stream, remote_addr)) => {
+                                let _ = stream.set_nodelay(true);
+                                setup_tcp_quickack(&stream);
+                                requests_since_last_gc += 1;
+                                let worker_clone = std::rc::Rc::clone(&worker);
+                                let routes_arc_c = Arc::clone(&routes_arc);
+                                let conn_token = shutdown.clone();
+                                let bridge_c = main_bridge.clone();
+                                tracker.spawn_local(async move {
+                                    crate::worker::drive_tcp_conn(stream, remote_addr, worker_clone, routes_static, routes_arc_c, conn_token, tls_acc, bridge_c).await;
+                                });
+                                if requests_since_last_gc >= oom_failsafe {
+                                    fire_gc(&worker);
+                                    requests_since_last_gc = 0;
+                                    gc_timer.reset();
+                                }
+                            }
+                            Err(e) => handle_accept_error(&e).await,
+                        }
+                    }
+                    (res, tls_acc) = tls_accept_or_pending(tls_slot1) => {
+                        match res {
+                            Ok((stream, remote_addr)) => {
+                                let _ = stream.set_nodelay(true);
+                                setup_tcp_quickack(&stream);
+                                requests_since_last_gc += 1;
+                                let worker_clone = std::rc::Rc::clone(&worker);
+                                let routes_arc_c = Arc::clone(&routes_arc);
+                                let conn_token = shutdown.clone();
+                                let bridge_c = main_bridge.clone();
+                                tracker.spawn_local(async move {
+                                    crate::worker::drive_tcp_conn(stream, remote_addr, worker_clone, routes_static, routes_arc_c, conn_token, tls_acc, bridge_c).await;
+                                });
+                                if requests_since_last_gc >= oom_failsafe {
+                                    fire_gc(&worker);
+                                    requests_since_last_gc = 0;
+                                    gc_timer.reset();
+                                }
+                            }
+                            Err(e) => handle_accept_error(&e).await,
+                        }
+                    }
                     _ = gc_timer.tick(), if requests_since_last_gc > 0 => {
                         // Idle tick: the select! raced the tick against
                         // accept() and the tick won — the accept queue
@@ -959,6 +1047,38 @@ pub(crate) async fn tpc_accept_loop_inline(
                             let bridge_c = main_bridge.clone();
                             tracker.spawn_local(async move {
                                 crate::worker::drive_tcp_conn(stream, remote_addr, worker_clone, routes_static, routes_arc_c, conn_token, tls_acc_c, bridge_c).await;
+                            });
+                        }
+                        Err(e) => handle_accept_error(&e).await,
+                    }
+                }
+                (res, tls_acc) = tls_accept_or_pending(tls_slot0) => {
+                    match res {
+                        Ok((stream, remote_addr)) => {
+                            let _ = stream.set_nodelay(true);
+                            setup_tcp_quickack(&stream);
+                            let worker_clone = std::rc::Rc::clone(&worker);
+                            let routes_arc_c = Arc::clone(&routes_arc);
+                            let conn_token = shutdown.clone();
+                            let bridge_c = main_bridge.clone();
+                            tracker.spawn_local(async move {
+                                crate::worker::drive_tcp_conn(stream, remote_addr, worker_clone, routes_static, routes_arc_c, conn_token, tls_acc, bridge_c).await;
+                            });
+                        }
+                        Err(e) => handle_accept_error(&e).await,
+                    }
+                }
+                (res, tls_acc) = tls_accept_or_pending(tls_slot1) => {
+                    match res {
+                        Ok((stream, remote_addr)) => {
+                            let _ = stream.set_nodelay(true);
+                            setup_tcp_quickack(&stream);
+                            let worker_clone = std::rc::Rc::clone(&worker);
+                            let routes_arc_c = Arc::clone(&routes_arc);
+                            let conn_token = shutdown.clone();
+                            let bridge_c = main_bridge.clone();
+                            tracker.spawn_local(async move {
+                                crate::worker::drive_tcp_conn(stream, remote_addr, worker_clone, routes_static, routes_arc_c, conn_token, tls_acc, bridge_c).await;
                             });
                         }
                         Err(e) => handle_accept_error(&e).await,

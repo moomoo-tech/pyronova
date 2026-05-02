@@ -238,7 +238,10 @@ pub(crate) fn apply_cors(resp: &mut Response<BoxBody>, cors: Option<&crate::rout
         headers.insert("access-control-allow-headers", v);
     }
     if cfg.allow_credentials {
-        headers.insert("access-control-allow-credentials", "true".parse().unwrap());
+        headers.insert(
+            "access-control-allow-credentials",
+            hyper::header::HeaderValue::from_static("true"),
+        );
     }
     if let Some(expose) = cfg.expose_headers.as_ref() {
         if let Ok(v) = expose.parse() {
@@ -560,6 +563,10 @@ pub(crate) fn build_stream_response(info: StreamInfo) -> Response<BoxBody> {
     }
     builder.body(boxed).unwrap_or_else(|e| {
         tracing::error!(target: "pyronova::handler", error = %e, "stream handler returned invalid response headers");
-        Response::new(BoxBody::default())
+        Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .header("server", crate::response::SERVER_HEADER)
+            .body(BoxBody::default())
+            .expect("static 500 response is always valid")
     })
 }

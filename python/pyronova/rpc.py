@@ -80,9 +80,10 @@ class RPCClient:
                     f"(status={resp.status_code}): {e}"
                 ) from e
 
-            if not data.get("ok", False):
+            if not isinstance(data, dict) or not data.get("ok", False):
+                err = data.get("error") if isinstance(data, dict) else repr(data)
                 raise RuntimeError(
-                    f"RPC {method_name} at {self.base_url}: {data.get('error')}"
+                    f"RPC {method_name} at {self.base_url}: {err}"
                 )
 
             return data.get("result", data)

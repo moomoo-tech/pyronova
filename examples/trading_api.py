@@ -149,7 +149,7 @@ def submit_order(req, order: OrderRequest):
 
     # Simple fill simulation
     slippage = random.uniform(0, 0.001)
-    fill_price = order.price * (1 + slippage if order.side == "buy" else 1 - slippage)
+    fill_price = order.price * ((1 + slippage) if order.side == "buy" else (1 - slippage))
 
     return {
         "status": "filled",

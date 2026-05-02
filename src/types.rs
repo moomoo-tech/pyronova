@@ -239,17 +239,39 @@ impl PyronovaResponse {
     #[new]
     #[pyo3(signature = (body, status_code=200, content_type=None, headers=None))]
     fn new(
+        py: Python<'_>,
         body: Py<PyAny>,
         status_code: u16,
         content_type: Option<String>,
-        headers: Option<HashMap<String, String>>,
-    ) -> Self {
-        PyronovaResponse {
+        headers: Option<Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<Self> {
+        let headers_map = if let Some(dict) = headers {
+            let mut map = HashMap::with_capacity(dict.len());
+            for (k, v) in dict.iter() {
+                let key: String = k.extract()?;
+                if let Ok(s) = v.extract::<String>() {
+                    map.insert(key, s);
+                } else if let Ok(list) = v.extract::<Vec<String>>() {
+                    // Multiple values (e.g. multiple Set-Cookie headers):
+                    // encode as NUL-separated string. build_response splits on '\0'
+                    // to emit separate HTTP header lines.
+                    if !list.is_empty() {
+                        map.insert(key, list.join("\0"));
+                    }
+                }
+                // Values of unexpected types are silently dropped.
+            }
+            map
+        } else {
+            let _ = py;
+            HashMap::new()
+        };
+        Ok(PyronovaResponse {
             body,
             status_code,
             content_type,
-            headers: headers.unwrap_or_default(),
-        }
+            headers: headers_map,
+        })
     }
 }
 

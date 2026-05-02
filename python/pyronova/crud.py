@@ -139,7 +139,11 @@ def register_crud(
                 body={"error": "invalid limit/offset"},
                 status_code=400,
             )
-        rows = pool.fetch_all(list_sql, limit, offset)
+        try:
+            rows = pool.fetch_all(list_sql, limit, offset)
+        except RuntimeError:
+            _log.exception("list_rows: fetch_all failed")
+            return Response(body={"error": "database error"}, status_code=500)
         return rows
 
     # --- GET /prefix/{id} ---------------------------------------------------
@@ -154,7 +158,11 @@ def register_crud(
             id_val = id_type(raw_id)
         except (TypeError, ValueError):
             return Response(body={"error": "invalid id"}, status_code=400)
-        row = pool.fetch_one(get_sql, id_val)
+        try:
+            row = pool.fetch_one(get_sql, id_val)
+        except RuntimeError:
+            _log.exception("get_row: fetch_one failed")
+            return Response(body={"error": "database error"}, status_code=500)
         if row is None:
             return Response(body={"error": "not found"}, status_code=404)
         return row
@@ -167,7 +175,7 @@ def register_crud(
     def create_row(req):
         try:
             body = req.json()
-        except Exception:
+        except ValueError:
             _log.exception("create_row: failed to parse request body")
             return Response(body={"error": "invalid JSON"}, status_code=400)
         if not isinstance(body, dict):
@@ -190,7 +198,7 @@ def register_crud(
             row = pool.fetch_one(insert_sql, *args)
         except RuntimeError:
             _log.exception("create_row: DB error on INSERT into %s", table)
-            return Response(body={"error": "database error"}, status_code=400)
+            return Response(body={"error": "database error"}, status_code=500)
         return Response(body=row, status_code=201)
 
     # --- PUT /prefix/{id} ---------------------------------------------------
@@ -205,7 +213,7 @@ def register_crud(
             return Response(body={"error": "invalid id"}, status_code=400)
         try:
             body = req.json()
-        except Exception:
+        except ValueError:
             _log.exception("update_row: failed to parse request body")
             return Response(body={"error": "invalid JSON"}, status_code=400)
         if not isinstance(body, dict):
@@ -229,7 +237,7 @@ def register_crud(
             row = pool.fetch_one(update_sql, *args)
         except RuntimeError:
             _log.exception("update_row: DB error on UPDATE in %s", table)
-            return Response(body={"error": "database error"}, status_code=400)
+            return Response(body={"error": "database error"}, status_code=500)
         if row is None:
             return Response(body={"error": "not found"}, status_code=404)
         return row

@@ -100,8 +100,8 @@ async def _process_request(req_id, handler_idx, method, path, params, query, bod
             _log.exception("async handler req_id=%s: send timeout response failed", req_id)
     except asyncio.CancelledError:
         # Propagated cancellation — client disconnected or Rust future dropped.
-        # Don't send response; the oneshot receiver is already gone.
-        pass
+        # Re-raise to let asyncio mark the task as CANCELLED (required by asyncio contract).
+        raise
     except Exception:
         _log.exception("async handler req_id=%s path=%s raised", req_id, path)
         try:

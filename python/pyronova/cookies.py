@@ -117,6 +117,11 @@ def set_cookie(
             raise ValueError(
                 f"invalid samesite={samesite!r}; must be 'Strict', 'Lax', or 'None'"
             )
+        if samesite_norm == "None" and not secure:
+            raise ValueError(
+                "SameSite=None requires Secure=True; browsers silently drop "
+                "SameSite=None cookies that are not Secure (Chrome 80+, Firefox, Safari)"
+            )
         parts.append(f"SameSite={samesite_norm}")
 
     cookie_str = "; ".join(parts)

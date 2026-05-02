@@ -170,6 +170,18 @@ pub fn stop_rss_sampler() {
     }
 }
 
+/// Return the OS page size in bytes at runtime.
+///
+/// `/proc/self/statm` reports RSS in pages; the page size is 4 KiB on x86_64
+/// but 16 KiB or 64 KiB on aarch64 Linux. Using a hardcoded 4096 causes
+/// under-reporting by 4x–16x on those hosts.
+#[cfg(target_os = "linux")]
+fn page_size_bytes() -> u64 {
+    // SAFETY: sysconf with _SC_PAGESIZE is always well-defined, never fails.
+    let ps = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if ps > 0 { ps as u64 } else { 4096 }
+}
+
 /// Get current process RSS in bytes (platform-specific, zero dependencies).
 fn get_rss_bytes() -> u64 {
     #[cfg(target_os = "macos")]
@@ -190,7 +202,7 @@ fn get_rss_bytes() -> u64 {
         std::fs::read_to_string("/proc/self/statm")
             .ok()
             .and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok())
-            .map(|pages| pages * 4096)
+            .map(|pages| pages * page_size_bytes())
             .unwrap_or(0)
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]

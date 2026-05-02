@@ -9,9 +9,14 @@ import inspect
 
 import os
 
-from pyronova.engine import PyronovaApp as _PyronovaApp, Response, init_logger, emit_python_log
+from pyronova.engine import PyronovaApp as _PyronovaApp, Response, SharedState, init_logger, emit_python_log
 from pyronova.mcp import MCPServer
 import logging as _logging
+
+try:
+    from pydantic import ValidationError as _PydanticValidationError
+except ImportError:
+    _PydanticValidationError = Exception  # type: ignore[assignment,misc]
 
 
 class LogConfig(TypedDict, total=False):
@@ -265,7 +270,7 @@ class Pyronova:
         })
 
     @property
-    def state(self):
+    def state(self) -> SharedState:
         """Shared state across all sub-interpreters (nanosecond latency).
 
         Usage::
@@ -333,7 +338,7 @@ class Pyronova:
                 async def wrapper(req):
                     try:
                         validated = mdl.model_validate_json(req.body)
-                    except Exception as e:
+                    except _PydanticValidationError as e:
                         return _validation_error_response(e)
                     if len(params) >= 2:
                         return await fn(req, validated)
@@ -342,7 +347,7 @@ class Pyronova:
                 def wrapper(req):
                     try:
                         validated = mdl.model_validate_json(req.body)
-                    except Exception as e:
+                    except _PydanticValidationError as e:
                         return _validation_error_response(e)
                     if len(params) >= 2:
                         return fn(req, validated)
@@ -384,6 +389,7 @@ class Pyronova:
 
     def enable_cors(
         self,
+        *,
         allow_origins: str | list[str] = "*",
         allow_methods: str | list[str] = "GET, POST, PUT, DELETE, PATCH, OPTIONS",
         allow_headers: str | list[str] = "*",
@@ -816,6 +822,7 @@ class Pyronova:
         io_workers: int | None = None,
         tls_cert: str | None = None,
         tls_key: str | None = None,
+        extra_tls_ports: list[int] | None = None,
     ) -> None:
         """Start the Pyronova server.
 
@@ -829,7 +836,7 @@ class Pyronova:
         """
         # Priority: param > env var > default
         host = host or os.environ.get("PYRONOVA_HOST", "127.0.0.1")
-        port = port or int(os.environ.get("PYRONOVA_PORT", "8000"))
+        port = port if port is not None else int(os.environ.get("PYRONOVA_PORT", "8000"))
         _w_env = os.environ.get("PYRONOVA_WORKERS")
         if workers is None and _w_env:
             workers = int(_w_env)
@@ -848,6 +855,9 @@ class Pyronova:
                 f"tls_cert={'set' if tls_cert else 'missing'}, "
                 f"tls_key={'set' if tls_key else 'missing'}"
             )
+        if extra_tls_ports is None:
+            _ep = os.environ.get("PYRONOVA_TLS_PORTS")
+            extra_tls_ports = [int(p) for p in _ep.split(",") if p.strip()] if _ep else None
 
         # Hot reload: watch .py files, restart on change
         reload = reload or os.environ.get("PYRONOVA_RELOAD") == "1"
@@ -920,6 +930,7 @@ class Pyronova:
                 io_workers=io_workers,
                 tls_cert=tls_cert,
                 tls_key=tls_key,
+                extra_tls_ports=extra_tls_ports,
             )
         finally:
             # Run shutdown hooks (even if server exits abnormally)
