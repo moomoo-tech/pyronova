@@ -509,15 +509,15 @@ impl PyronovaApp {
 
         if mode == "subinterp" || mode == "auto" {
             if tpc_enabled {
+                // When extra_tls is non-empty the TLS ports are handled by
+                // those extra listeners; the main addr is plain HTTP.
+                let main_tls = if extra_tls.is_empty() {
+                    tls_acceptor
+                } else {
+                    None
+                };
                 self.run_tpc_subinterp(
-                    py,
-                    addr,
-                    workers,
-                    io_workers,
-                    num_cpus,
-                    frozen,
-                    tls_acceptor,
-                    extra_tls,
+                    py, addr, workers, io_workers, num_cpus, frozen, main_tls, extra_tls,
                 )
             } else {
                 self.run_subinterp(
