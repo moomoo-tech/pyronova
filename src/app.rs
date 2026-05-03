@@ -370,12 +370,11 @@ impl PyronovaApp {
         let num_cpus = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        // workers = Python sub-interpreter count (default: num_cpus)
+        // workers = TPC thread count (TPC mode) or sub-interpreter count (non-TPC).
+        // Default: physical_core_count() in TPC mode (avoids SMT thrash), num_cpus otherwise.
+        let workers_explicit = workers.is_some();
         let workers = workers.unwrap_or(num_cpus);
-        // io_workers = Tokio async thread count + accept loop count.
-        // Default logic splits by mode (set further below once we know
-        // whether TPC is active) — explicit override always wins.
-        let io_workers_explicit = io_workers.is_some();
+        // io_workers = Tokio async thread count + accept loop count (non-TPC mode).
         let io_workers = io_workers.unwrap_or(num_cpus);
 
         // Freeze route table: extract from RwLock into read-only Arc.
@@ -499,12 +498,11 @@ impl PyronovaApp {
         // non-TPC can exploit SMT because one sibling does IO while
         // the other does Python bytecode — different cache footprints.
         // TPC runs the SAME codepath on every thread, so SMT siblings
-        // step on each other. Explicit override via workers= or
-        // PYRONOVA_IO_WORKERS env var still honored.
-        let io_workers = if tpc_enabled && !io_workers_explicit {
+        // step on each other. Explicit override via PYRONOVA_WORKERS still honored.
+        let workers = if tpc_enabled && !workers_explicit {
             crate::tpc::physical_core_count()
         } else {
-            io_workers
+            workers
         };
 
         if mode == "subinterp" || mode == "auto" {
@@ -531,7 +529,7 @@ impl PyronovaApp {
                 )
             }
         } else if tpc_enabled {
-            self.run_tpc_gil(py, addr, io_workers, num_cpus, frozen, tls_acceptor)
+            self.run_tpc_gil(py, addr, workers, num_cpus, frozen, tls_acceptor)
         } else {
             self.run_gil(py, addr, io_workers, num_cpus, frozen, tls_acceptor)
         }
@@ -1080,8 +1078,8 @@ impl PyronovaApp {
         &self,
         py: Python<'_>,
         addr: SocketAddr,
-        _workers: usize,
-        io_workers: usize,
+        workers: usize,
+        _io_workers: usize,
         num_cpus: usize,
         routes: FrozenRoutes,
         tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
@@ -1138,8 +1136,8 @@ impl PyronovaApp {
         // the bootstrap script, then swaps back. Returned workers have
         // `tstate` saved (GIL released) — the TPC thread will rebind it
         // via rebind_tstate_to_current_thread before use.
-        let n_threads = io_workers;
-        let mut workers = Vec::with_capacity(n_threads);
+        let n_threads = workers;
+        let mut sub_workers = Vec::with_capacity(n_threads);
         for i in 0..n_threads {
             let w = unsafe {
                 interp::SubInterpreterWorker::new(
@@ -1154,7 +1152,7 @@ impl PyronovaApp {
                     ))
                 })?
             };
-            workers.push(w);
+            sub_workers.push(w);
         }
 
         // Phase 3 gil=True bridge: spawn a dedicated main-interp thread
@@ -1194,7 +1192,7 @@ impl PyronovaApp {
                 addr,
                 n_threads,
                 num_cpus,
-                workers,
+                sub_workers,
                 routes,
                 tls_acceptor,
                 main_bridge,
