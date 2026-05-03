@@ -338,6 +338,7 @@ async fn drive_gil_conn(
 /// to the TPC threads. Constraint check: startup must have rejected any
 /// gil=True / async def / stream=True route — the inline handler has no
 /// path to handle those (see handle_request_tpc_inline).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_tpc_subinterp(
     addr: SocketAddr,
     n_threads: usize,
@@ -408,6 +409,7 @@ pub(crate) fn run_tpc_subinterp(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_tpc_subinterp_per_thread_listener(
     addr: SocketAddr,
     n_threads: usize,
@@ -875,6 +877,7 @@ async fn tls_accept_or_pending(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn tpc_accept_loop_inline(
     addr: SocketAddr,
     extra_tls: Vec<(SocketAddr, Arc<tokio_rustls::TlsAcceptor>)>,
@@ -919,7 +922,7 @@ pub(crate) async fn tpc_accept_loop_inline(
             }
         })
         .collect();
-    let tls_slot0 = extra_listeners.get(0);
+    let tls_slot0 = extra_listeners.first();
     let tls_slot1 = extra_listeners.get(1);
 
     let gc_mode = gc_mode_from_env();
